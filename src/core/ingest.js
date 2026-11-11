@@ -17,6 +17,7 @@ export function ingest(dataset) {
   const findings = entries.map((entry) => entry.finding);
 
   assignUniqueIds(findings);
+  linkDuplicates(entries);
   for (const finding of findings) finding.flags.sort((a, b) => FLAGS.indexOf(a) - FLAGS.indexOf(b));
 
   return { findings, report: buildReport(dataset, records.length, findings) };
@@ -51,6 +52,46 @@ function assignUniqueIds(findings) {
       finding.sameRawId = group.filter((other) => other !== finding).map((other) => other.id).sort();
     }
   }
+}
+
+/**
+ * Records with different ids that describe the same observation. Records with no entity or no
+ * valid time are left alone: too little remains to call two of them the same.
+ */
+function linkDuplicates(entries) {
+  const groups = new Map();
+  for (const { finding, entityKey, observedAtMs, dedupeKey } of entries) {
+    if (entityKey === '' || observedAtMs === null) continue;
+    const key = [entityKey, finding.caseIds.join(','), observedAtMs, dedupeKey, finding.notes.trim()].join('\u0000');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(finding);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const [canonical, ...copies] = group.toSorted(compareCanonical);
+    for (const copy of copies) {
+      copy.duplicateOf = canonical.id;
+      copy.flags.push('reingested_duplicate');
+    }
+    canonical.duplicates = copies.map((copy) => copy.id);
+  }
+}
+
+/** The lowest id is the original: the data offers no other ordering (no import dates). */
+function compareCanonical(a, b) {
+  const na = numericPart(a.rawId);
+  const nb = numericPart(b.rawId);
+  if (na !== nb) {
+    if (na === null) return 1;
+    if (nb === null) return -1;
+    return na - nb;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function numericPart(rawId) {
+  const digits = /\d+/.exec(rawId);
+  return digits === null ? null : Number(digits[0]);
 }
 
 function buildReport(dataset, recordCount, findings) {
