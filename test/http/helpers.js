@@ -3,6 +3,16 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+/** Copied from the plan rather than imported, so a typo in the source cannot make its own test pass. */
+export const CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+export const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cross-origin-resource-policy': 'same-origin',
+};
+
 export const PUBLIC_FILES = {
   'index.html': '<!doctype html><title>Findings</title><script type="module" src="/app.js"></script>\n',
   'app.js': "import './highlight.js';\n",

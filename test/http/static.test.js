@@ -3,10 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createStatic } from '../../src/http/static.js';
-import { listen, request, makePublicDir, PUBLIC_FILES } from './helpers.js';
-
-const CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+import { listen, request, makePublicDir, PUBLIC_FILES, CSP } from './helpers.js';
 
 const SERVED = [
   ['/', 'index.html', 'text/html; charset=utf-8'],
