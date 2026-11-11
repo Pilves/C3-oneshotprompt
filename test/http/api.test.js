@@ -204,6 +204,37 @@ describe('HTTP API on the real dataset', { skip: storeModule === null && 'src/co
     assert.ok(text.includes(`"notes":${JSON.stringify(finding.notes)}`), 'a JSON string, not decoded or re-encoded');
   });
 
+  test('GET /api/cases: 40 cases in order, plus the unassigned count', async () => {
+    const { status, headers, body } = await get('/api/cases');
+    assert.equal(status, 200);
+    assert.equal(headers.get('content-type'), JSON_TYPE);
+    assert.equal(headers.get('cache-control'), 'no-store');
+    assert.deepEqual(Object.keys(body).sort(), ['cases', 'unassigned']);
+    assert.deepEqual(
+      body.cases.map((c) => c.caseId),
+      Array.from({ length: 40 }, (_, i) => `C-${101 + i}`),
+    );
+    for (const c of body.cases) {
+      assert.deepEqual(
+        Object.keys(c).sort(),
+        ['caseId', 'duplicateCount', 'findingCount', 'firstObservedAt', 'lastObservedAt', 'types'],
+        c.caseId,
+      );
+      assert.deepEqual(Object.keys(c.types).sort(), [...FINDING_TYPES].sort(), c.caseId);
+      assert.ok(c.firstObservedAt <= c.lastObservedAt, c.caseId);
+    }
+    assert.equal(body.cases.reduce((sum, c) => sum + c.findingCount, 0), 1002);
+    assert.equal(body.cases.reduce((sum, c) => sum + c.duplicateCount, 0), 30);
+    assert.deepEqual(body.unassigned, { findingCount: 1 });
+    assert.deepEqual(body, JSON.parse(JSON.stringify(store.listCases())), 'the store answer, verbatim');
+  });
+
+  test('GET /healthz counts every finding, duplicates included', async () => {
+    const { status, body } = await get('/healthz');
+    assert.equal(status, 200);
+    assert.deepEqual(body, { status: 'ok', findings: 1032 });
+  });
+
   test('an unsafe source gets no href', async () => {
     const { status, body } = await get('/api/findings/F-10968');
     assert.equal(status, 200);

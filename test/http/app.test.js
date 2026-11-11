@@ -45,8 +45,23 @@ const SEARCH_RESULT = {
   facets: { types: { domain: 0, ip: 1, email: 0, handle: 0, alias: 0, wallet: 0, unknown: 0 } },
 };
 
+const CASES = {
+  cases: [
+    {
+      caseId: 'C-101',
+      findingCount: 2,
+      duplicateCount: 1,
+      types: { domain: 1, ip: 1, email: 0, handle: 0, alias: 0, wallet: 0, unknown: 0 },
+      firstObservedAt: '2026-09-10T11:11:30.000Z',
+      lastObservedAt: '2026-09-11T08:00:00.000Z',
+    },
+  ],
+  unassigned: { findingCount: 1 },
+};
+
 /** Records what the API asks for and answers with fixed values, so the tests see exactly what passes through. */
 const store = {
+  stats: { records: 4, findings: 3 },
   searches: [],
   lookups: [],
   search(params) {
@@ -56,6 +71,9 @@ const store = {
   getFinding(id) {
     this.lookups.push(id);
     return id === 'F-1' ? FINDING : null;
+  },
+  listCases() {
+    return CASES;
   },
 };
 
@@ -500,4 +518,30 @@ test('a store that throws becomes a generic 500 and is logged', async (t) => {
     }
   });
   assert.equal(logged.mock.callCount(), 2);
+});
+
+test('GET /api/cases returns the store’s case list verbatim', async () => {
+  const res = await send({ path: '/api/cases' });
+  assertJson(res, 200, CASES, '/api/cases');
+  assert.equal(res.headers['cache-control'], 'no-store');
+  assertSecurityHeaders(res, '/api/cases');
+});
+
+test('HEAD /api/cases gets the headers of GET and no body', async () => {
+  const get = await send({ path: '/api/cases' });
+  const head = await send({ method: 'HEAD', path: '/api/cases' });
+  assert.equal(head.status, 200);
+  assert.equal(head.body, '');
+  assert.equal(head.headers['content-length'], get.headers['content-length']);
+  assert.equal(head.headers['content-type'], JSON_TYPE);
+});
+
+test('GET /healthz reports the number of findings', async () => {
+  const res = await send({ path: '/healthz' });
+  assertJson(res, 200, { status: 'ok', findings: 3 }, '/healthz');
+  assert.equal(res.headers['cache-control'], 'no-store');
+  assertSecurityHeaders(res, '/healthz');
+  const head = await send({ method: 'HEAD', path: '/healthz' });
+  assert.equal(head.status, 200);
+  assert.equal(head.body, '');
 });

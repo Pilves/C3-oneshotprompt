@@ -21,7 +21,7 @@ const FINDING_PATH = /^\/api\/findings\/([^/]+)$/;
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {URL} url
- * @param {{ search: Function, getFinding: Function }} store
+ * @param {{ search: Function, getFinding: Function, listCases: Function }} store
  */
 export function handleApi(req, res, url, store) {
   if (url.pathname === '/api/findings') {
@@ -31,6 +31,10 @@ export function handleApi(req, res, url, store) {
   const findingPath = FINDING_PATH.exec(url.pathname);
   if (findingPath) {
     getFinding(res, findingPath[1], store);
+    return;
+  }
+  if (url.pathname === '/api/cases') {
+    sendJson(res, 200, store.listCases());
     return;
   }
   sendJson(res, 404, { error: { code: 'not_found', message: 'Not found' } });

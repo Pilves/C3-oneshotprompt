@@ -95,6 +95,10 @@ export function createApp({ store, config, mcpHandler, publicDir = DEFAULT_PUBLI
         sendJson(res, 405, { error: { code: 'method_not_allowed', message: 'Method not allowed' } }, { Allow: 'GET, HEAD' });
         return;
       }
+      if (url.pathname === '/healthz') {
+        sendJson(res, 200, { status: 'ok', findings: store.stats.findings });
+        return;
+      }
       if (url.pathname.startsWith('/api/')) {
         handleApi(req, res, url, store);
         return;
