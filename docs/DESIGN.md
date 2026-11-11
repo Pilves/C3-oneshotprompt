@@ -12,7 +12,7 @@ Contents: [1 Summary](#1-summary) · [2 Architecture](#2-architecture) · [3 Sto
 | HTTP | `node:http`, one process, one port: UI, `/api/*`, `/mcp`, `/healthz` |
 | Storage | The JSON file is normalised once at start-up into an in-memory array. No database |
 | Search | Linear scan over diacritic-folded text; substring matching, light stemming, a small Estonian/English glossary; server computes highlight ranges |
-| MCP | Hand-written JSON-RPC handler for protocol revision **2026-07-28** (stateless, no `initialize`), checked against the official client |
+| MCP | Hand-written JSON-RPC handler for protocol revision **2026-07-28**, plus a stateless fallback for clients that still open with the 2025 `initialize` handshake (dual-era, no sessions); checked against the official client |
 | UI | One static page, vanilla JS, DOM built with `textContent` only, strict CSP |
 | Data policy | Normalise for retrieval, never overwrite: every finding carries its original record verbatim, and anomalies are flagged rather than silently fixed or dropped |
 | Tests | `node --test`, no test framework |
@@ -46,6 +46,7 @@ src/core/store.js      createStore(): search / getFinding / listCases / stats
 src/http/app.js        routing, Host/Origin check, security headers
 src/http/api.js        /api handlers
 src/http/static.js     fixed allowlist of static files
+src/http/respond.js    JSON response helper for the HTTP side
 src/mcp/protocol.js    constants and JSON-RPC helpers
 src/mcp/handler.js     Streamable HTTP transport rules and method dispatch
 src/mcp/tools.js       tool definitions and calls into the store
@@ -88,7 +89,7 @@ Folding `õ ä ö ü` to `o a o u` is linguistically lossy (they are distinct Es
 
 1. *Exact*: the folded term as a substring.
 2. *Stem*: for purely alphabetic terms of 5 or more letters, the term with its last 1, 2 or 3 letters removed (never shorter than 4). This is deliberately crude suffix stripping: `sisselogimine` → `sisselogimi` finds `sisselogimisi`; `rünnakule` → `rünnaku` finds `rünnakut`; `domeenid` → `domeen`. It handles English plurals and tenses the same way.
-3. *Glossary*: a table of about twenty term groups such as `phish | õngits`, `domain | domeen`, `source | allika`, `log, journal | žurnaal`. If the term starts with any stem in a group, every stem in that group is tried. `phishing` therefore also finds `õngitsuskampaanias`, and `õngitsemine` finds both languages.
+3. *Glossary*: a table of about twenty term groups such as `phish | õngits`, `domain | domeen`, `source | allika`, `log, journal | žurnaal`. If the term starts with any stem in a group, or is at least 4 letters long and is itself the start of one (`dome`, but not `dom`), every stem in that group is tried. `phishing` therefore also finds `õngitsuskampaanias`, and `õngitsemine` finds both languages.
 
 **Ranking.** Each term scores `variant weight × position factor`, summed over terms. Variant weights: exact 4, stem 2, glossary 1. Position factor: 4 if the term equals the whole entity, 3 if the entity starts with it, 2 if the match starts at a word boundary, 1 if it is inside a word. Ties are broken by newest `observedAt`, then id. The effect: an exact entity is always first, a literal match beats a stemmed one, a stemmed one beats a translated one, and `c2` inside a wallet's hex digits ranks below the note that says "C2 range".
 
@@ -125,13 +126,13 @@ Principles:
 
 | Field | Canonical form | Rule | Dataset cases |
 | --- | --- | --- | --- |
-| `id` | `id` (unique), `rawId` | First record with a given id keeps it. A later record with the same id but different content becomes `<id>-2`, `<id>-3`, … in file order. All records sharing a raw id get the flag `duplicate_id` and list each other in `sameRawId` | `F-10578` and `F-10401` each occur twice with unrelated content → `F-10578`, `F-10578-2`, `F-10401`, `F-10401-2` |
-| `entity` | `entity` (trimmed, letter case as collected) | Only surrounding whitespace is removed. A lower-cased `entityKey` is used internally for duplicate detection | 4 padded values, 3 upper-case emails |
+| `id` | `id` (unique), `rawId` | First record with a given id keeps it. Every later record with the same id becomes `<id>-2`, `<id>-3`, … in file order, whether or not its content differs (ids are compared without regard to letter case, as lookups are; identical content is then linked as a duplicate, 4.4). All records sharing a raw id get the flag `duplicate_id` and list each other in `sameRawId` | `F-10578` and `F-10401` each occur twice with unrelated content → `F-10578`, `F-10578-2`, `F-10401`, `F-10401-2` |
+| `entity` | `entity` (trimmed, letter case as collected) | Only surrounding whitespace is removed. A lower-cased, NFC-normalised `entityKey` is used internally for duplicate detection | 4 padded values, 3 upper-case emails |
 | `type` | `type` ∈ `domain ip email handle alias wallet unknown`, `typeRaw` | See 4.2 | 7 non-canonical labels |
 | `caseId` | `caseIds`: sorted array of `C-<n>` | Trim, upper-case. An array becomes several case ids (`multi_case`). `null` or missing becomes `[]` (`case_missing`). Anything else that does not match `C-<digits>` is dropped from `caseIds` and flagged `case_invalid` | `" c-117"` → `["C-117"]`; `["C-104","C-122"]`; `null` |
-| `observedAt` | ISO 8601 UTC string, or `null` | Strings are parsed as ISO 8601 with their offset and converted to UTC. Numbers are epoch **milliseconds**; values below 10¹¹ are treated as seconds. Unparseable → `null` + `time_invalid` | 730 `Z`, 180 with `+02:00`/`+03:00`, 122 epoch ms |
+| `observedAt` | ISO 8601 UTC string, or `null` | Strings are parsed as ISO 8601 with their offset and converted to UTC; a date-time without `Z` or an offset is not guessed. Numbers, and strings of digits only, are epoch **milliseconds**; values below 10¹¹ are treated as seconds. Unparseable → `null` + `time_invalid` | 730 `Z`, 180 with `+02:00`/`+03:00`, 122 epoch ms |
 | `sourceUrl` | `source: { raw, href, status }` | See 4.3 | 7 with `utm_*`, 5 trailing slashes, 1 `data:`, 1 `javascript:`, 1 without scheme, 1 empty |
-| `notes` | `notes` string (`""` if absent) | Missing key and `null` both become `""` with `notes_missing`. Text is otherwise untouched: no HTML decoding, no stripping. Two advisory flags: `notes_markup` (contains tags or entities) and `notes_instruction_like` (see 6.5) | 4 missing, 3 `null`, 7 with markup, 4 instruction-like |
+| `notes` | `notes` string (`""` if absent) | Missing key, `null` and non-string values become `""`; those and an empty or whitespace-only string are flagged `notes_missing`. Text is otherwise untouched: no HTML decoding, no stripping. Two advisory flags: `notes_markup` (contains tags or entities) and `notes_instruction_like` (see 6.5) | 4 missing, 3 `null`, 7 with markup, 4 instruction-like |
 
 ### 4.2 Type
 
@@ -162,15 +163,15 @@ Two of these are judgement calls. F-10380: an email address can legitimately be 
 
 | `status` | Condition | `href` |
 | --- | --- | --- |
-| `ok` | Parses as an absolute URL with scheme `http` or `https` and a host | The URL as collected |
-| `scheme_assumed` | No scheme, but looks like `host/path` | `https://` + raw. Flag `source_scheme_assumed` |
+| `ok` | Parses as an absolute URL with scheme `http` or `https` and a host | The URL as collected, as the URL parser serialises it |
+| `scheme_assumed` | No scheme, but looks like `host/path` or `host:port/path` | `https://` + raw. Flag `source_scheme_assumed` |
 | `unsafe` | Any other scheme (`javascript:`, `data:`, `file:`, …) | `null`. Flag `source_unsafe` |
 | `missing` | Empty or absent | `null`. Flag `source_missing` |
 | `invalid` | Anything else | `null`. Flag `source_invalid` |
 
 The UI renders a link only when `href` is set, re-checks the scheme itself before assigning it, and opens it with `rel="noopener noreferrer"` and `referrerpolicy="no-referrer"`. Everything else is shown as inert text with the reason. The raw value is always displayed.
 
-The link target is the URL exactly as collected, tracking parameters included: that is the evidence. A cleaned form (no `utm_*` parameters, no trailing slash) is used only as part of the duplicate key.
+The link target is the URL exactly as collected, tracking parameters included: that is the evidence. A cleaned form (no `utm_*` parameters, no fragment, no trailing slash) is used only as part of the duplicate key.
 
 All source hosts in the dataset are under `.example`, which is reserved (RFC 2606) and does not resolve. The links are correct and dead by construction.
 
@@ -180,10 +181,11 @@ Two different things are called "duplicate" in this data, and they get opposite 
 
 **Same id, different content** (2 ids). These are two distinct findings with an id collision. Both are kept as full findings and made addressable (4.1).
 
-**Different id, same content** (30 pairs). Every `F-200xx` record repeats an `F-10xxx` record. They are considered the same observation when all of these are equal: folded entity, set of case ids, instant of `observedAt`, cleaned source URL, notes. On this dataset that key yields exactly the 30 pairs and nothing else; 6 pairs are identical apart from the id, the rest differ by whitespace, letter case, epoch-vs-ISO time, `utm_*` parameters or a trailing slash.
+**Different id, same content** (30 pairs). Every `F-200xx` record repeats an `F-10xxx` record. They are considered the same observation when all of these are equal: entity (trimmed, lower-cased and NFC-normalised; diacritics are kept, unlike in search), set of case ids, instant of `observedAt`, cleaned source URL, notes. On this dataset that key yields exactly the 30 pairs and nothing else; 6 pairs are identical apart from the id, the rest differ by whitespace, letter case, epoch-vs-ISO time, `utm_*` parameters or a trailing slash.
 
 - The record with the lowest id is the canonical one. The others get `duplicateOf: <canonical id>` and the flag `reingested_duplicate`; the canonical one lists them in `duplicates`.
 - Search and case counts hide duplicates by default (`includeDuplicates=true` shows them). Nothing is deleted: a duplicate is still returned by id, with a pointer to its canonical record.
+- A record with no entity or no valid `observedAt` is never linked: too little is left to call two of them the same. (None in this dataset.)
 
 After ingest: 1032 records → 1002 distinct findings + 30 linked duplicates, in 40 cases plus one finding with no case.
 
@@ -199,30 +201,35 @@ All responses are JSON, UTF-8, `Cache-Control: no-store`. Only `GET` and `HEAD` 
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/findings` | Search and browse. Query parameters: `q`, `type` (comma-separated), `case`, `from`, `to`, `limit` (1–100, default 20), `offset`, `includeDuplicates` |
-| `GET /api/findings/:id` | One finding including `raw` |
+| `GET /api/findings` | Search and browse. Query parameters: `q`, `type` (comma-separated or repeated), `case`, `from`, `to`, `limit` (1–100, default 20), `offset`, `includeDuplicates`. Other query parameters are ignored |
+| `GET /api/findings/:id` | One finding including `raw`. The id is matched without regard to letter case |
 | `GET /api/cases` | Case ids with counts, type breakdown and first/last observation |
 | `GET /healthz` | Liveness and record count |
 
 ```jsonc
 // GET /api/findings?q=ongitsus&type=ip&limit=1
 {
-  "total": 21, "limit": 1, "offset": 0,
-  "facets": { "types": { "ip": 21, "domain": 20, "email": 24, "handle": 17, "alias": 19, "wallet": 26, "unknown": 0 } },
+  "total": 20, "limit": 1, "offset": 0,
+  "facets": { "types": { "domain": 20, "ip": 20, "email": 18, "handle": 20, "alias": 22, "wallet": 23, "unknown": 1 } },
   "results": [{
-    "id": "F-10681", "rawId": "F-10681", "type": "ip", "typeRaw": "ip",
-    "entity": "192.0.2.244", "caseIds": ["C-112"], "observedAt": "2026-09-14T07:02:11.000Z",
+    "id": "F-10617", "rawId": "F-10617", "type": "ip", "typeRaw": "ip",
+    "entity": "198.51.100.130", "caseIds": ["C-113"], "observedAt": "2026-10-25T09:55:10.000Z",
     "notes": "Kasutaja märgiti õngitsuskampaanias.",
-    "source": { "raw": "https://chat.example/1234", "href": "https://chat.example/1234", "status": "ok" },
+    "source": { "raw": "https://chat.example/25643", "href": "https://chat.example/25643", "status": "ok" },
     "flags": [], "duplicateOf": null, "duplicates": [], "sameRawId": [],
     "score": 8, "highlights": { "entity": [], "notes": [[17, 25]] }
   }]
 }
 ```
 
-(The numbers in this example are illustrative.)
+(Actual output on the provided dataset.)
 
-Errors: `{ "error": { "code", "message", "details"? } }` with `400 invalid_params` (one detail entry per bad parameter), `404 not_found`, `405 method_not_allowed`, `500 internal`.
+Errors: `{ "error": { "code", "message", "details"? } }` with:
+
+- `400 invalid_params`: one detail entry `{ param, message }` per bad parameter, using the HTTP names (`q`, `type`, `case`, …). A finding id with malformed %-encoding gets the same code with `param: "id"`.
+- `400 bad_request`: a request target the URL parser cannot read.
+- `403 forbidden`: `Host` or `Origin` not on the allowlist (section 8). On `/mcp` this body is a JSON-RPC error instead, as are all `/mcp` errors.
+- `404 not_found`, `405 method_not_allowed` (with `Allow: GET, HEAD`), `500 internal`.
 
 Dates: `from`/`to` accept `YYYY-MM-DD` or a full date-time with `Z` or an offset. A bare date is interpreted in UTC; `to` as a bare date includes that whole day. A date-time without a zone is rejected rather than guessed.
 
@@ -256,7 +263,7 @@ Section names refer to pages under <https://modelcontextprotocol.io/specificatio
 | GET and DELETE are gone; answer 405 | same › Backward Compatibility › Earlier Streamable HTTP Revisions | Any method other than POST → `405`, `Allow: POST`. That is also a valid answer for a 2025 server that offers no standalone SSE stream (2025-11-25 `basic/transports` › Listening for Messages) |
 | No sessions; ignore `Mcp-Session-Id` and `Last-Event-ID`, never mint a session id | same; `changelog` major 1, 9 | Headers ignored, nothing echoed. Legacy clients get no session either: in 2025 a server only MAY assign one |
 | Validate `Origin`; invalid → 403 | same › Security & Endpoint | Host and Origin hostnames checked against an allowlist (loopback by default) on every route |
-| Bind to localhost when running locally | same | The container listens on all interfaces because it must; Compose publishes the port on `127.0.0.1` only |
+| Bind to localhost when running locally | same | Outside a container the server binds to `127.0.0.1` by default. The container listens on all interfaces because it must; Compose publishes the port on `127.0.0.1` only |
 | Body is a single JSON-RPC request or notification, never a response, never a batch | same › Sending Messages | Arrays and responses → `400` / `-32600`, in both eras |
 | Notification accepted → `202`, no body | same | Yes. The core protocol defines no client notification over HTTP in this revision; any that arrive are acknowledged and ignored |
 | Request answered with `application/json` or an SSE stream | same | JSON for everything except `subscriptions/listen` |
@@ -345,7 +352,7 @@ One page, no framework, no build. State lives in the URL fragment (`#/search?q=�
 - Search box (debounced, stale responses discarded), type filter with per-type counts, case filter, date range, "show duplicates".
 - Results list: type, entity and notes with highlights, cases, time, flags as badges.
 - Detail view: every canonical field, the source link (4.3), duplicates and id collisions as links, and the original record as JSON.
-- Times are shown in UTC and in `Europe/Tallinn`.
+- Times are shown in UTC in the results list, and in both UTC and `Europe/Tallinn` in the detail view.
 
 **Rendering untrusted text.** The page never parses data as HTML. There is no `innerHTML`, `outerHTML`, `insertAdjacentHTML` or `document.write` in the code, and a test fails the build if one appears. Highlighted text is built by cutting the string at the server-supplied offsets and appending text nodes and `<mark>` elements, so a note that contains `<script>`, `<img onerror>` or its own `<mark>` is displayed as those literal characters. As a second layer the page is served with `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, which would block an injected script even if a rendering bug existed.
 
@@ -368,7 +375,7 @@ One page, no framework, no build. State lives in the URL fragment (`#/search?q=�
 
 ## 9. Testing
 
-`npm test` runs `node --test`. No framework, no browser.
+`npm test` runs `node --test` over `test/**/*.test.js`. No framework, no browser.
 
 | Layer | What is covered |
 | --- | --- |
@@ -377,8 +384,9 @@ One page, no framework, no build. State lives in the URL fragment (`#/search?q=�
 | Ingest on the real file | 1032 records → 1002 + 30; exact lists of flagged ids; `F-10578` and `F-10401` both retrievable in both variants |
 | Search | Both languages, diacritic-free queries, compounds, stems, glossary, IP/wallet/email fragments, ranking order, AND semantics, filters, facets, pagination, highlight ranges that slice to the expected text |
 | HTTP API | Shapes, validation errors, 404/405, security headers, Host/Origin rejection, hostile notes returned byte-for-byte as JSON |
-| MCP | Every row of 6.2 as a black-box HTTP test; tool results; injection notes arrive flagged, verbatim, under `dataNotice` |
-| MCP interoperability | Official v2 client pinned to 2026-07-28 (skipped when dev dependencies are not installed) |
+| MCP | Every row of 6.2 and 6.3 as a black-box HTTP test, legacy requests included; tool results; injection notes arrive flagged, verbatim, under `dataNotice` |
+| MCP interoperability | The official v2 client in all three negotiation modes: pinned to 2026-07-28, `auto` (both negotiate 2026-07-28) and its default (negotiates 2025-11-25 through the stateless fallback). Each lists the tools, calls all three, gets `isError` for a bad argument and `-32602` for an unknown tool. Skipped when dev dependencies are not installed |
+| End to end | `src/server.js` started as a child process on the real file: health check, the page with its CSP, the same search through `/api` and through MCP returning the same ids in the same order, and exit code 0 within 2 s of `SIGTERM` |
 | UI | Pure functions (range splitting, link policy) and a static scan for forbidden DOM sinks. Rendering in a real browser is a manual check, listed in the README |
 
 ## 10. Ambiguities register
@@ -393,7 +401,7 @@ One page, no framework, no build. State lives in the URL fragment (`#/search?q=�
 | T4 | "fetch one finding by id", but ids are not unique | 4.1: every record gets a unique, stable id; collisions are flagged and cross-linked | Lookup must be a function. Picking one silently would hide a finding |
 | T5 | "optional filters": which? | Type (required by the UI section), case, date range, duplicates | These are the dimensions the data has. Source host was left out as low value |
 | T6 | `list_cases` is required, but there is no case data beyond the id | Returns ids with counts, type breakdown and first/last observation, plus a note that no case metadata exists | Derivable facts only; nothing invented. The HTTP API has the same endpoint because the UI's case filter needs it |
-| T7 | "following MCP spec version 2026-07-28": that revision removes the handshake most clients and the v1 SDK still use | Implement exactly that revision; reject the old handshake with an error that names the supported version | 6.1, 6.3 |
+| T7 | "following MCP spec version 2026-07-28": that revision removes the handshake most clients and the v1 SDK still use | Implement that revision in full. Also answer the 2025 `initialize` handshake without sessions, so clients that have not adopted 2026-07-28 still work; anything carrying a 2026-07-28 marker gets 2026-07-28 rules only | 6.1, 6.3 |
 | T8 | Is `query` required for `search_findings`? ("free-text query, optional filters") | Required, may be an empty string | Matches the wording; an empty string means "browse with filters" |
 | T9 | "link to its source", but some sources are not safe or not URLs | 4.3 | A link is rendered only when it is safe to click |
 | T10 | "matching text highlighted": in which fields, and what counts as matching for stemmed or translated hits? | Entity and notes; highlight the text that actually matched | The analyst should see why a result is there |
@@ -438,5 +446,5 @@ One page, no framework, no build. State lives in the URL fragment (`#/search?q=�
 - **No phrase queries, no fuzzy matching** for typos.
 - **Start-up load only.** New data needs a restart.
 - **No authentication or audit trail** (section 8).
-- **Modern MCP clients only** (6.3).
+- **Legacy MCP clients get a subset of the 2025 transport** (6.3): no session, no standalone GET stream, no stream resumption, no batches. Tool calls do not need any of them, and the official client works in its default mode.
 - **Browser rendering is not covered by automated tests**; the logic that makes it safe is.
