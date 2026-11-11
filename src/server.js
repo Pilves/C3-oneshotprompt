@@ -34,3 +34,15 @@ server.listen(config.port, config.host, () => {
   const { address, port } = /** @type {import('node:net').AddressInfo} */ (server.address());
   console.log(`Listening on ${address}:${port}`);
 });
+
+// As PID 1 in a container, Node ignores signals it has no handler for, and `docker compose down` would wait
+// out its 10 s timeout. `once`: a second Ctrl-C outside a container falls back to the default and kills.
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down`);
+  // Open subscriptions/listen streams would otherwise keep server.close() waiting forever.
+  mcpHandler.close();
+  server.close();
+  setTimeout(() => server.closeAllConnections(), 5000).unref();
+}
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);
