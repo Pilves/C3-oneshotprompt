@@ -243,7 +243,7 @@ The server here is hand-written. The surface needed is small (three methods plus
 To keep "hand-written" from meaning "probably compliant", two checks were made:
 
 - The official v2 server was run with a trivial tool and probed with about forty requests covering every rule below. Where the specification leaves a status code open, this implementation follows the reference behaviour, and the differences are listed in 6.4.
-- The official v2 **client**, pinned to 2026-07-28, connects to this server, lists the tools and calls them, as a dev-only test (`test/mcp/interop.test.js`). The client validates each `structuredContent` against the tool's `outputSchema`.
+- The official v2 **client** connects to this server, lists the tools and calls them, in all three of its negotiation modes: pinned to 2026-07-28, `auto`, and its default 2025 handshake (6.3). This runs as a dev-only test (`test/mcp/interop.test.js`). The client validates each `structuredContent` against the tool's `outputSchema`.
 
 ### 6.2 Compliance notes
 
@@ -252,18 +252,19 @@ Section names refer to pages under <https://modelcontextprotocol.io/specificatio
 | Requirement | Source | Implementation |
 | --- | --- | --- |
 | One endpoint that accepts POST; each message is its own POST | `basic/transports/streamable-http` › intro, Sending Messages | `POST /mcp` |
-| GET and DELETE are gone; answer 405 | same › Backward Compatibility › Earlier Streamable HTTP Revisions | Any method other than POST → `405`, `Allow: POST` |
-| No sessions; ignore `Mcp-Session-Id` and `Last-Event-ID`, never mint a session id | same; `changelog` major 1, 9 | Headers ignored, nothing echoed |
+| A server MAY serve legacy (`initialize`-based) clients as well as modern ones | `basic/versioning` › Backward Compatibility with Initialization-Based Versions | Dual-era, stateless in both eras. Each request is classified on its own (6.3) |
+| GET and DELETE are gone; answer 405 | same › Backward Compatibility › Earlier Streamable HTTP Revisions | Any method other than POST → `405`, `Allow: POST`. That is also a valid answer for a 2025 server that offers no standalone SSE stream (2025-11-25 `basic/transports` › Listening for Messages) |
+| No sessions; ignore `Mcp-Session-Id` and `Last-Event-ID`, never mint a session id | same; `changelog` major 1, 9 | Headers ignored, nothing echoed. Legacy clients get no session either: in 2025 a server only MAY assign one |
 | Validate `Origin`; invalid → 403 | same › Security & Endpoint | Host and Origin hostnames checked against an allowlist (loopback by default) on every route |
 | Bind to localhost when running locally | same | The container listens on all interfaces because it must; Compose publishes the port on `127.0.0.1` only |
-| Body is a single JSON-RPC request or notification, never a response, never a batch | same › Sending Messages | Arrays and responses → `400` / `-32600` |
+| Body is a single JSON-RPC request or notification, never a response, never a batch | same › Sending Messages | Arrays and responses → `400` / `-32600`, in both eras |
 | Notification accepted → `202`, no body | same | Yes. The core protocol defines no client notification over HTTP in this revision; any that arrive are acknowledged and ignored |
 | Request answered with `application/json` or an SSE stream | same | JSON for everything except `subscriptions/listen` |
-| Every request carries `_meta` with `io.modelcontextprotocol/protocolVersion` and `…/clientCapabilities`; missing → `-32602`, HTTP 400 | `basic` › `_meta` › Per-request protocol fields | Checked on every request. No state is kept between requests (`basic` › Statelessness) |
-| `MCP-Protocol-Version` header required and equal to the body value; mismatch → 400 `HeaderMismatch` (`-32020`) | `basic/transports/streamable-http` › Protocol Version Header, Server Validation | Yes |
-| `Mcp-Method` header required on all requests, `Mcp-Name` on `tools/call`; missing or different from the body → 400 / `-32020`. `Mcp-Name` may use the `=?base64?…?=` encoding and must be decoded before comparing | same › Standard Request Headers, Value Encoding, Server Validation | Yes |
-| Unsupported version → 400 `UnsupportedProtocolVersionError` (`-32022`) with `data.supported` and `data.requested` | `basic/versioning` › Protocol Version Negotiation | Yes. Supported: `["2026-07-28"]` |
-| Unknown method → **404** with JSON-RPC `-32601` | `basic/transports/streamable-http` › Protocol Version Header | Yes, including the removed `ping` and the unadvertised `prompts/*`, `resources/*` |
+| Every request carries `_meta` with `io.modelcontextprotocol/protocolVersion` and `…/clientCapabilities`; missing → `-32602`, HTTP 400 | `basic` › `_meta` › Per-request protocol fields | Checked on every request that carries any modern marker (6.3). No state is kept between requests (`basic` › Statelessness) |
+| `MCP-Protocol-Version` header required and equal to the body value; mismatch → 400 `HeaderMismatch` (`-32020`) | `basic/transports/streamable-http` › Protocol Version Header, Server Validation | Yes, on modern requests. A request with no header and no other modern marker is a 2025-03-26 client, which the same section allows a server to assume |
+| `Mcp-Method` header required on all requests, `Mcp-Name` on `tools/call`; missing or different from the body → 400 / `-32020`. `Mcp-Name` may use the `=?base64?…?=` encoding and must be decoded before comparing | same › Standard Request Headers, Value Encoding, Server Validation | Yes, on modern requests (an `Mcp-Method` header is itself a modern marker). A sentinel with invalid Base64 counts as a mismatch |
+| Unsupported version → 400 `UnsupportedProtocolVersionError` (`-32022`) with `data.supported` and `data.requested` | `basic/versioning` › Protocol Version Negotiation | Yes. Supported: `["2026-07-28"]`. The legacy versions are not listed, because they are reachable only through `initialize` (6.3) |
+| Unknown method → **404** with JSON-RPC `-32601` | `basic/transports/streamable-http` › Protocol Version Header | Yes, including the removed `ping` and the unadvertised `prompts/*`, `resources/*`. Legacy requests get `200` instead (6.3) |
 | `server/discover` MUST be implemented | `server/discover`; `basic/versioning` | Returns `supportedVersions`, `capabilities: { tools: {} }`, `instructions`, cache hints |
 | Results carry `resultType` | `basic` › Responses › ResultType; `changelog` major 8 | `"complete"` on every result |
 | Servers SHOULD identify themselves in each result's `_meta` | `basic` › Per-response protocol fields | `io.modelcontextprotocol/serverInfo` on every result |
@@ -276,11 +277,32 @@ Section names refer to pages under <https://modelcontextprotocol.io/specificatio
 | Servers MUST NOT send JSON-RPC requests | `basic/patterns` | None. No sampling, elicitation or roots; no client capability is ever required, so `-32021` is never returned |
 | Tool security: validate inputs, rate-limit, sanitise outputs, access control | `server/tools` › Security Considerations | Inputs validated by the shared validator; a simple per-address rate limit on `tools/call`; outputs are JSON-encoded data with an explicit handling notice (6.5). Access control: see 8 |
 
-### 6.3 A legacy client
+### 6.3 Legacy clients: a stateless dual-era fallback
 
-A client that opens with `initialize` gets `400` and `-32022` with `data.supported: ["2026-07-28"]`. The specification asks a modern-only server to name its supported versions in any error it returns to `initialize` (`basic/versioning` › Backward Compatibility), and this error does that in a machine-readable form that a dual-era client understands. Serving the 2025 handshake as well is permitted by the specification but was left out: the assignment names one revision.
+The assignment names revision 2026-07-28, and that is what the server implements in full. It also answers clients that still open with the 2025 `initialize` handshake over Streamable HTTP: v1 SDK clients, and the official v2 client in its default configuration. Without this, the specification's compatibility matrix gives the outcome as "Fails" (Legacy client, Modern server), and the server would be unusable from any client that has not adopted 2026-07-28 yet. The specification allows a server to support both eras (`basic/versioning` › Backward Compatibility with Initialization-Based Versions), and doing it without sessions costs a few dozen lines and no state.
 
-Practical consequence: clients must speak 2026-07-28. With the official TypeScript client that means `versionNegotiation: { mode: 'auto' }` or `{ mode: { pin: '2026-07-28' } }`. The README has a `curl` example.
+Each request is classified on its own, after the JSON-RPC shape checks (body size, JSON, single request, id):
+
+| The request | Treated as | Answer |
+| --- | --- | --- |
+| has any modern marker: `params._meta["io.modelcontextprotocol/protocolVersion"]`, `MCP-Protocol-Version: 2026-07-28`, or an `Mcp-Method` header | Modern | Every rule in 6.2. `initialize` → `400` / `-32022` |
+| otherwise, method `initialize` | Legacy handshake | `200` `{ protocolVersion, capabilities: { tools: {} }, serverInfo, instructions }`. The requested version is echoed if it is `2025-11-25`, `2025-06-18` or `2025-03-26`; any other gets `2025-11-25` (2025-11-25 `basic/lifecycle` › Version Negotiation) |
+| otherwise, `MCP-Protocol-Version` absent or one of those three | Legacy request | `tools/list`, `tools/call` and `ping` → `200`; any other method → `200` / `-32601` |
+| otherwise (an unknown header version and no modern marker) | Neither | `400` / `-32022` |
+
+How the legacy side works:
+
+- **No session.** The `initialize` answer mints no `Mcp-Session-Id`; in 2025 a server only MAY assign one. The client then sends each request with the negotiated version header, and each is answered on its own exactly like a modern request. `notifications/initialized` gets `202` like any notification. Nothing about the handshake needs remembering, because no answer depends on it.
+- **Same tools, same results.** `tools/list` returns the same tool objects, and `tools/call` goes through the same validation, rate limit and tool code. Results leave out what the 2025-11-25 schema does not define: `resultType`, `ttlMs`, `cacheScope` and the per-result `serverInfo`. A 2025-03-26 client ignores `title`, `outputSchema` and `structuredContent`, and still gets the full JSON in the text block.
+- **Errors are `200`.** The 2025 transport gives no HTTP status to method errors, and there a `404` means "session terminated" or "no Streamable HTTP endpoint here", which would make a client start over or give up. The official SDK's stateless fallback also answers `200`.
+- **Not served:** the standalone GET stream (`405`, which the 2025 transport allows), stream resumption, server-to-client requests (nothing here needs them), and JSON-RPC batches, which only 2025-03-26 permitted (`400`).
+
+Two choices keep the eras from bleeding into each other:
+
+- **Any modern marker wins.** A dual-era client tries a modern request first, and falls back to `initialize` only if a `400` body is not a recognised modern error (`basic/transports/streamable-http` › Backward Compatibility). So anything that looks modern gets a modern answer, including an `initialize` that carries a modern marker: it gets `-32022` and no handshake.
+- **`supported` lists only `2026-07-28`**, in `-32022` errors and in `server/discover`. These lists name versions a client can put in the per-request `_meta`. Listing `2025-11-25` there would invite a modern request with `"protocolVersion": "2025-11-25"` in `_meta`, which no revision defines.
+
+With the official TypeScript client, the default configuration connects through the handshake. `versionNegotiation: { mode: 'auto' }` and `{ mode: { pin: '2026-07-28' } }` speak 2026-07-28. The README has a `curl` example.
 
 ### 6.4 Where the specification leaves room
 
@@ -293,6 +315,8 @@ Practical consequence: clients must speak 2026-07-28. With the official TypeScri
 | Whether a server with nothing to notify must still implement `subscriptions/listen` | Implemented | `basic` says all implementations MUST support the message patterns, and no capability gates this method |
 | Tool argument fails the input schema: protocol error or `isError` result? The schema reference lists "invalid tool arguments" under `-32602`; the Tools page lists input validation under tool execution errors | `isError` result | The Tools page gives the reason (the model can read it and retry), and the reference server does the same |
 | Rate limit exceeded | `isError` result with a retry hint | No error code is defined; a result is the one channel the model is guaranteed to see |
+| `initialize` carrying a modern marker | `400` / `-32022` with `data.supported` | A recognised modern error, so a dual-era client stays modern, and it names the versions to use. The reference SDK answers `-32020` when the header is modern, `404` / `-32601` when the envelope is, and treats an `Mcp-Method` header alone as legacy |
+| Legacy request with an unknown `MCP-Protocol-Version` and no modern marker | `400` / `-32022` | The 2025 transport only requires `400`. The reference SDK sends `-32000`, which `basic` › Error Codes now retires; `-32022` is the defined code for exactly this |
 
 ### 6.5 Tools and untrusted content
 
