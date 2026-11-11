@@ -9,6 +9,56 @@ const DEFAULT_HOSTS = loadConfig({}).allowedHosts;
 const JSON_TYPE = 'application/json; charset=utf-8';
 const NOT_FOUND = { error: { code: 'not_found', message: 'Not found' } };
 
+const DEFAULT_PARAMS = {
+  query: '',
+  types: [],
+  caseId: null,
+  from: null,
+  to: null,
+  limit: 20,
+  offset: 0,
+  includeDuplicates: false,
+};
+
+const FINDING = {
+  id: 'F-1',
+  rawId: 'F-1',
+  type: 'ip',
+  typeRaw: 'IPv4',
+  entity: '198.51.100.7',
+  caseIds: ['C-101'],
+  observedAt: '2026-09-11T08:00:00.000Z',
+  notes: '<script>alert(1)</script> &lt;b&gt;',
+  source: { raw: 'javascript:alert(1)', href: null, status: 'unsafe' },
+  flags: ['type_mismatch', 'source_unsafe', 'notes_markup'],
+  duplicateOf: null,
+  duplicates: [],
+  sameRawId: [],
+  raw: { id: 'F-1', type: 'IPv4', notes: '<script>alert(1)</script> &lt;b&gt;', sourceUrl: 'javascript:alert(1)' },
+};
+const { raw: _raw, ...SUMMARY } = FINDING;
+const SEARCH_RESULT = {
+  total: 1,
+  limit: 20,
+  offset: 0,
+  results: [{ ...SUMMARY, score: 8, highlights: { entity: [[0, 3]], notes: [] } }],
+  facets: { types: { domain: 0, ip: 1, email: 0, handle: 0, alias: 0, wallet: 0, unknown: 0 } },
+};
+
+/** Records what the API asks for and answers with fixed values, so the tests see exactly what passes through. */
+const store = {
+  searches: [],
+  lookups: [],
+  search(params) {
+    this.searches.push(params);
+    return SEARCH_RESULT;
+  },
+  getFinding(id) {
+    this.lookups.push(id);
+    return id === 'F-1' ? FINDING : null;
+  },
+};
+
 const mcpCalls = [];
 async function mcpStub(req, res) {
   mcpCalls.push({ method: req.method, url: req.url });
@@ -20,7 +70,7 @@ let publicDir;
 let server;
 before(async () => {
   publicDir = makePublicDir();
-  server = await listen(createApp({ store: {}, config: loadConfig({}), mcpHandler: mcpStub, publicDir: publicDir.dir }));
+  server = await listen(createApp({ store, config: loadConfig({}), mcpHandler: mcpStub, publicDir: publicDir.dir }));
 });
 after(async () => {
   await server.close();
@@ -29,7 +79,7 @@ after(async () => {
 
 /** Starts a second app with different dependencies for the duration of `fn`. */
 async function withApp(deps, fn) {
-  const own = await listen(createApp({ config: loadConfig({}), mcpHandler: mcpStub, publicDir: publicDir.dir, store: {}, ...deps }));
+  const own = await listen(createApp({ store, config: loadConfig({}), mcpHandler: mcpStub, publicDir: publicDir.dir, ...deps }));
   try {
     await fn(own.port);
   } finally {
@@ -358,4 +408,96 @@ test('an exception after the headers were sent drops the connection', { timeout:
     assert.equal(logged.mock.callCount(), 1);
     assert.equal((await request(port, { path: '/' })).status, 200, 'the server keeps serving');
   });
+});
+
+test('GET /api/findings passes the defaults to the store and returns its answer verbatim', async () => {
+  const before = store.searches.length;
+  const res = await send({ path: '/api/findings' });
+  assertJson(res, 200, SEARCH_RESULT, '/api/findings');
+  assert.equal(res.headers['cache-control'], 'no-store');
+  assertSecurityHeaders(res, '/api/findings');
+  assert.deepEqual(store.searches.slice(before), [DEFAULT_PARAMS]);
+});
+
+test('GET /api/findings maps the HTTP parameter names onto the validator', async () => {
+  const before = store.searches.length;
+  const query =
+    'q=%C3%B5ngitsus+kampaania&type=ip,Domain&case=c-104&from=2026-09-01&to=2026-09-30&limit=5&offset=10&includeDuplicates=true';
+  assert.equal((await send({ path: `/api/findings?${query}` })).status, 200);
+  assert.deepEqual(store.searches.slice(before), [
+    {
+      query: 'õngitsus kampaania',
+      types: ['domain', 'ip'],
+      caseId: 'C-104',
+      from: Date.parse('2026-09-01T00:00:00.000Z'),
+      to: Date.parse('2026-09-30T23:59:59.999Z'),
+      limit: 5,
+      offset: 10,
+      includeDuplicates: true,
+    },
+  ]);
+});
+
+test('GET /api/findings with an invalid parameter gets 400 and does not reach the store', async () => {
+  const before = store.searches.length;
+  const res = await send({ path: '/api/findings?case=X-1' });
+  assert.equal(res.status, 400);
+  assert.deepEqual(JSON.parse(res.body), {
+    error: {
+      code: 'invalid_params',
+      message: 'Invalid query parameters',
+      details: [{ param: 'case', message: 'must be a case id such as C-104, or "unassigned"' }],
+    },
+  });
+  assert.equal(store.searches.length, before);
+});
+
+test('GET /api/findings/:id returns the finding, raw record included', async () => {
+  const res = await send({ path: '/api/findings/F-1' });
+  assertJson(res, 200, FINDING, '/api/findings/F-1');
+  assert.equal(res.headers['cache-control'], 'no-store');
+  assertSecurityHeaders(res, '/api/findings/F-1');
+});
+
+test('GET /api/findings/:id decodes the id and passes it on unchanged', async () => {
+  const before = store.lookups.length;
+  assert.equal((await send({ path: '/api/findings/F%2D1' })).status, 200);
+  assert.equal((await send({ path: '/api/findings/%20f-1%20' })).status, 404, 'trimming and case are the store’s business');
+  assert.deepEqual(store.lookups.slice(before), ['F-1', ' f-1 ']);
+});
+
+test('GET /api/findings/:id for an unknown id gets 404 naming the id', async () => {
+  const res = await send({ path: '/api/findings/nope' });
+  assertJson(res, 404, { error: { code: 'not_found', message: 'No finding with id nope' } }, 'nope');
+});
+
+test('HEAD on the API gets the headers of GET and no body', async () => {
+  for (const path of ['/api/findings', '/api/findings/F-1', '/api/findings/nope']) {
+    const get = await send({ path });
+    const head = await send({ method: 'HEAD', path });
+    assert.equal(head.status, get.status, path);
+    assert.equal(head.body, '', path);
+    assert.equal(head.headers['content-length'], get.headers['content-length'], path);
+  }
+});
+
+test('a store that throws becomes a generic 500 and is logged', async (t) => {
+  const logged = t.mock.method(console, 'error', () => {});
+  const failing = {
+    search() {
+      throw new Error('secret store failure');
+    },
+    getFinding() {
+      throw new Error('secret store failure');
+    },
+  };
+  await withApp({ store: failing }, async (port) => {
+    for (const path of ['/api/findings?q=x', '/api/findings/F-1']) {
+      const res = await request(port, { path });
+      assertJson(res, 500, { error: { code: 'internal', message: 'Internal error' } }, path);
+      assertSecurityHeaders(res, path);
+      assert.doesNotMatch(res.body, /secret/);
+    }
+  });
+  assert.equal(logged.mock.callCount(), 2);
 });

@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { handleApi } from './api.js';
 import { sendJson } from './respond.js';
 import { createStatic } from './static.js';
 
@@ -92,6 +93,10 @@ export function createApp({ store, config, mcpHandler, publicDir = DEFAULT_PUBLI
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         sendJson(res, 405, { error: { code: 'method_not_allowed', message: 'Method not allowed' } }, { Allow: 'GET, HEAD' });
+        return;
+      }
+      if (url.pathname.startsWith('/api/')) {
+        handleApi(req, res, url, store);
         return;
       }
       serveStatic(req, res, url.pathname);
