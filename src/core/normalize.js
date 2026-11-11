@@ -28,6 +28,9 @@ const HTTP_URL = /^https?:\/\//i;
 const ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const HOST_AND_PORT = /^[a-z0-9.-]+\.[a-z]{2,}:\d+(\/|$)/i;
 const SCHEMELESS_URL = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(:\d+)?(\/\S*)?$/i;
+const MARKUP = /<\/?[a-z!][^>]*>|&(?:[a-z]+|#\d+);/i;
+const INSTRUCTION_LIKE =
+  /(?:^|[\s<>])(?:system|assistant|ai analyst|ai assistant)\s*:|\bignore\b.{0,40}\b(?:instructions?|user|question|above|previous)\b|\bdo not mention\b|\breply only with\b|<\/?important>/i;
 const LABEL_SYNONYMS = { ipv4: 'ip', ipv6: 'ip' };
 // Types that have no checkable syntax, so the label is the only evidence and is trusted.
 const LABEL_ONLY_TYPES = ['handle', 'alias', 'wallet'];
@@ -155,4 +158,73 @@ function dedupeKey(url) {
   key.pathname = key.pathname.replace(/\/+$/, '') || '/';
   // The URL parser has already lower-cased the host (http and https are special schemes).
   return key.toString();
+}
+
+/**
+ * Advisory only: tells the analyst (and an AI client) that a note deserves a second look. The
+ * patterns are easy to evade and nothing relies on them for safety.
+ * @param {string} notes
+ * @returns {string[]}
+ */
+export function noteWarnings(notes) {
+  const flags = [];
+  if (MARKUP.test(notes)) flags.push('notes_markup');
+  if (INSTRUCTION_LIKE.test(notes)) flags.push('notes_instruction_like');
+  return flags;
+}
+
+/**
+ * Normalises one record on its own. Id uniqueness and duplicate links need the whole dataset and
+ * are added by ingest; until then `id` is the raw id.
+ * @param {unknown} raw one element of the findings array
+ * @param {number} index its position, used to name a record that has no id
+ * @returns {{ finding: object, entityKey: string, observedAtMs: number|null, dedupeKey: string } | null}
+ *   null when the element is not a record at all
+ */
+export function normalizeRecord(raw, index) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const flags = [];
+
+  const idText = typeof raw.id === 'string' || typeof raw.id === 'number' ? String(raw.id).trim() : '';
+  if (idText === '') flags.push('id_missing');
+  const rawId = idText === '' ? `row-${index}` : idText;
+
+  const entity = typeof raw.entity === 'string' ? raw.entity.trim() : '';
+  if (entity === '') flags.push('entity_missing');
+
+  const typeRaw = typeof raw.type === 'string' ? raw.type : '';
+  const { type, mismatch } = normalizeType(typeRaw, entity);
+  if (mismatch) flags.push('type_mismatch');
+
+  const cases = normalizeCaseIds(raw.caseId);
+  const time = normalizeObservedAt(raw.observedAt);
+  const source = normalizeSource(raw.sourceUrl);
+
+  const notes = typeof raw.notes === 'string' ? raw.notes : '';
+  if (notes.trim() === '') flags.push('notes_missing');
+
+  flags.push(...cases.flags, ...time.flags, ...source.flags, ...noteWarnings(notes));
+  flags.sort((a, b) => FLAGS.indexOf(a) - FLAGS.indexOf(b));
+
+  return {
+    finding: {
+      id: rawId,
+      rawId,
+      type,
+      typeRaw,
+      entity,
+      caseIds: cases.caseIds,
+      observedAt: time.iso,
+      notes,
+      source: source.source,
+      flags,
+      duplicateOf: null,
+      duplicates: [],
+      sameRawId: [],
+      raw,
+    },
+    entityKey: entity.toLowerCase().normalize('NFC'),
+    observedAtMs: time.ms,
+    dedupeKey: source.dedupeKey,
+  };
 }
