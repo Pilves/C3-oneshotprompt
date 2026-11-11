@@ -201,6 +201,7 @@ test('tools/call returns structuredContent and the same JSON as text', async () 
   const { rpc } = await shared;
   const result = assertResult(await rpc('tools/call', { name: 'search_findings', arguments: { query: '198' } }));
   assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify(result.structuredContent) }]);
+  assert.ok(result.content[0].text.startsWith('{"dataNotice":'));
   const [hit] = result.structuredContent.results;
   assert.deepEqual(hit.matchedIn, ['entity']);
   assert.equal('score' in hit, false);
