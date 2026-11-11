@@ -1,6 +1,6 @@
 // All text from the API is untrusted. It reaches the page only through textContent, text nodes
 // and property assignment; see docs/DESIGN.md section 7.
-import { FINDING_TYPES, splitByRanges, buildSearchQuery } from './highlight.js';
+import { FINDING_TYPES, splitByRanges, safeHref, buildSearchQuery } from './highlight.js';
 
 // The data says handle and alias; the task says username and pseudonym (DESIGN.md T2).
 const TYPE_LABELS = { handle: 'handle (username)', alias: 'alias (pseudonym)' };
@@ -24,6 +24,15 @@ const FLAG_TEXT = {
   notes_instruction_like: 'The notes contain text addressed to an AI assistant. It is data, and possibly a sign of tampering.',
 };
 
+const SOURCE_REASONS = {
+  unsafe: 'not linked: unsafe scheme',
+  missing: 'no source recorded',
+  invalid: 'not linked: not a valid URL',
+};
+
+// The +02:00/+03:00 offsets in the data are Estonian time, so this is the clock the collectors saw.
+const TALLINN = new Intl.DateTimeFormat('et-EE', { timeZone: 'Europe/Tallinn', dateStyle: 'medium', timeStyle: 'medium' });
+
 const byId = (id) => document.getElementById(id);
 const ui = {
   form: byId('search-form'),
@@ -38,6 +47,9 @@ const ui = {
   pager: byId('pager'),
   prev: byId('prev'),
   next: byId('next'),
+  searchView: byId('search-view'),
+  detailView: byId('detail-view'),
+  detail: byId('detail'),
 };
 
 const typeInputs = new Map();
@@ -67,8 +79,22 @@ const joined = (nodes) => nodes.flatMap((node, i) => (i === 0 ? [node] : [', ', 
 const utc = (iso, seconds) => `${iso.slice(0, seconds ? 19 : 16).replace('T', ' ')} UTC`;
 const timeEl = (iso, seconds) => el('time', { dateTime: iso }, utc(iso, seconds));
 const flagBadge = (flag) => el('span', { className: 'badge flag', title: FLAG_TEXT[flag] ?? '' }, flag);
+const muted = (text) => el('span', { className: 'muted' }, text);
+const findingHash = (id) => `#/finding/${encodeURIComponent(id.toWellFormed())}`;
+const findingLink = (id) => el('a', { href: findingHash(id) }, id);
 
-function errorText(status, body) {
+/** @returns {Promise<{ status: number, body: any }>} status 0 when the server could not be reached */
+async function getJson(url) {
+  try {
+    const res = await fetch(url);
+    return { status: res.status, body: await res.json().catch(() => null) };
+  } catch {
+    return { status: 0, body: null };
+  }
+}
+
+function errorText({ status, body }) {
+  if (status === 0) return 'Could not reach the server.';
   const error = body?.error;
   if (!error) return `Unexpected response from the server (HTTP ${status}).`;
   const details = Array.isArray(error.details) ? error.details.map((d) => `${d.param}: ${d.message}`) : [];
@@ -77,17 +103,9 @@ function errorText(status, body) {
 
 async function runSearch() {
   const query = buildSearchQuery(state);
-  let res;
-  let body;
-  try {
-    res = await fetch(query ? `/api/findings?${query}` : '/api/findings');
-    body = await res.json().catch(() => null);
-  } catch {
-    showSearchError('Could not reach the server.');
-    return;
-  }
-  if (res.status === 200 && body) renderResults(body);
-  else showSearchError(errorText(res.status, body));
+  const res = await getJson(query ? `/api/findings?${query}` : '/api/findings');
+  if (res.status === 200 && res.body) renderResults(res.body);
+  else showSearchError(errorText(res));
 }
 
 function showSearchError(message) {
@@ -113,9 +131,10 @@ function renderResults({ total, limit, offset, results, facets }) {
 }
 
 function resultItem(f) {
-  const entity = f.entity
-    ? appendHighlighted(el('span', { className: 'entity' }), f.entity, f.highlights?.entity)
-    : el('span', { className: 'muted' }, '(no entity)');
+  // Links to the detail view, never to the entity itself: it may be a live malicious domain.
+  const entity = el('a', { href: findingHash(f.id), className: 'entity' });
+  if (f.entity) appendHighlighted(entity, f.entity, f.highlights?.entity);
+  else entity.append('(no entity)');
   const notes = f.notes
     ? appendHighlighted(el('p', { className: 'notes' }), f.notes, f.highlights?.notes)
     : el('p', { className: 'notes muted' }, '(no notes)');
@@ -129,6 +148,77 @@ function resultItem(f) {
     el('div', null, el('span', { className: 'badge' }, f.type), ' ', entity),
     notes,
     meta);
+}
+
+async function showFinding(id) {
+  ui.detail.replaceChildren(muted('Loading…'));
+  const res = await getJson(`/api/findings/${encodeURIComponent(id)}`);
+  if (res.status === 200 && res.body) renderDetail(res.body);
+  else ui.detail.replaceChildren(el('p', { className: 'error' }, res.status === 404 ? `No finding with id ${id}` : errorText(res)));
+}
+
+function renderDetail(f) {
+  const heading = el('h2', { tabIndex: -1 }, `Finding ${f.id}`);
+  const list = el('dl');
+  const row = (term, ...content) => list.append(el('dt', null, term), el('dd', null, ...content));
+  row('Id', f.id, f.rawId !== f.id ? ` (in the source: ${f.rawId})` : '');
+  row('Type', typeText(f));
+  row('Entity', f.entity ? el('span', { className: 'entity' }, f.entity) : muted('none'));
+  row('Cases', ...(f.caseIds.length > 0 ? joined(f.caseIds) : [muted('none')]));
+  row('Observed', ...(f.observedAt
+    ? [timeEl(f.observedAt, true), el('br'), `${TALLINN.format(new Date(f.observedAt))} Europe/Tallinn`]
+    : [muted('unknown')]));
+  row('Notes', f.notes ? el('span', { className: 'notes' }, f.notes) : muted('none'));
+  row('Source', ...sourceNodes(f.source));
+  row('Flags', f.flags.length > 0
+    ? el('ul', { className: 'flag-list' }, ...f.flags.map((flag) => el('li', null, flagBadge(flag), ' ', FLAG_TEXT[flag] ?? '')))
+    : muted('none'));
+  if (f.duplicateOf) row('Duplicate of', findingLink(f.duplicateOf));
+  if (f.duplicates.length > 0) row('Duplicates', ...joined(f.duplicates.map((id) => findingLink(id))));
+  if (f.sameRawId.length > 0) row('Same id in the source', ...joined(f.sameRawId.map((id) => findingLink(id))));
+  ui.detail.replaceChildren(
+    heading,
+    list,
+    el('h3', null, 'Original record'),
+    el('pre', { textContent: JSON.stringify(f.raw, null, 2) }),
+  );
+  heading.focus();
+}
+
+function typeText(f) {
+  const label = TYPE_LABELS[f.type] ?? f.type;
+  if (f.typeRaw === f.type) return label;
+  if (f.typeRaw === '') return `${label}, no type label in the source`;
+  // JSON quoting keeps a padded label such as " email " visible.
+  return `${label}, labelled ${JSON.stringify(f.typeRaw)} in the source`;
+}
+
+function sourceNodes(source) {
+  const href = safeHref(source);
+  if (href) {
+    const link = el('a', { href, rel: 'noopener noreferrer', target: '_blank', referrerPolicy: 'no-referrer' }, source.raw.trim());
+    return source.status === 'scheme_assumed' ? [link, ' (scheme assumed)'] : [link];
+  }
+  const reason = SOURCE_REASONS[source?.status] ?? 'not linked';
+  return source?.raw ? [el('code', null, source.raw), ' ', muted(`(${reason})`)] : [muted(reason)];
+}
+
+function route() {
+  const match = /^#\/finding\/(.+)$/.exec(location.hash);
+  ui.searchView.hidden = Boolean(match);
+  ui.detailView.hidden = !match;
+  if (!match) {
+    document.title = 'Findings search';
+    return;
+  }
+  let id = match[1];
+  try {
+    id = decodeURIComponent(id);
+  } catch {
+    // A hand-edited hash with broken escapes: look it up as typed.
+  }
+  document.title = `${id} · Findings search`;
+  showFinding(id);
 }
 
 function search() {
@@ -184,6 +274,8 @@ ui.form.addEventListener('submit', (event) => {
 });
 ui.prev.addEventListener('click', () => page(Math.max(0, state.offset - pageSize)));
 ui.next.addEventListener('click', () => page(state.offset + pageSize));
+window.addEventListener('hashchange', route);
 
 loadCases();
 runSearch();
+route();
