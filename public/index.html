@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Findings search</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <h1><a href="#/search">Findings search</a></h1>
+  </header>
+  <main>
+    <section id="search-view">
+      <form id="search-form" role="search">
+        <label for="q">Search entities and notes</label>
+        <div class="query-row">
+          <input id="q" type="search" maxlength="200" autocomplete="off" spellcheck="false" autofocus>
+          <button type="submit">Search</button>
+        </div>
+        <fieldset id="type-filter">
+          <legend>Type</legend>
+        </fieldset>
+        <div class="filters">
+          <label>Case
+            <select id="case">
+              <option value="">any</option>
+              <option value="unassigned">unassigned</option>
+            </select>
+          </label>
+          <fieldset class="dates">
+            <legend>Observed (UTC days)</legend>
+            <label>from <input id="from" type="date"></label>
+            <label>to <input id="to" type="date"></label>
+          </fieldset>
+          <label><input id="dups" type="checkbox"> show duplicates</label>
+        </div>
+      </form>
+      <p id="status" aria-live="polite"></p>
+      <ol id="results"></ol>
+      <nav id="pager" aria-label="Result pages" hidden>
+        <button id="prev" type="button">Previous</button>
+        <button id="next" type="button">Next</button>
+      </nav>
+    </section>
+    <section id="detail-view" hidden>
+      <p><a id="back" href="#/search">Back to search</a></p>
+      <article id="detail"></article>
+    </section>
+  </main>
+</body>
+</html>
