@@ -271,6 +271,15 @@ test('/mcp: a Host or Origin that is not allowed gets a JSON-RPC 403 and never r
   assert.equal(mcpCalls.length, before);
 });
 
+test('/mcp: an allowed Origin reaches the handler', async () => {
+  for (const origin of ['http://localhost:5173', `http://127.0.0.1:${server.port}`, `http://[::1]:${server.port}`]) {
+    const before = mcpCalls.length;
+    const res = await send({ method: 'POST', path: '/mcp', headers: { Origin: origin } });
+    assert.equal(res.status, 202, origin);
+    assert.deepEqual(mcpCalls.slice(before), [{ method: 'POST', url: '/mcp' }], origin);
+  }
+});
+
 test('ALLOWED_HOSTS extends the allowlist', async () => {
   const config = loadConfig({ ALLOWED_HOSTS: 'Findings.Example, 10.0.0.5' });
   await withApp({ config }, async (port) => {
