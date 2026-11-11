@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectShape, normalizeType, normalizeCaseIds, normalizeObservedAt } from '../../src/core/normalize.js';
+import { detectShape, normalizeType, normalizeCaseIds, normalizeObservedAt, normalizeSource } from '../../src/core/normalize.js';
 
 test('detectShape', () => {
   const cases = [
@@ -144,4 +144,73 @@ test('observedAt: anything else is time_invalid', () => {
   ]) {
     assert.deepEqual(normalizeObservedAt(value), invalid, String(value));
   }
+});
+
+test('source: the anomalies in the dataset', () => {
+  assert.deepEqual(normalizeSource('data:text/html,<h1>hi</h1>').source, { raw: 'data:text/html,<h1>hi</h1>', href: null, status: 'unsafe' }); // F-10748
+  assert.deepEqual(normalizeSource("javascript:alert('check your links')").flags, ['source_unsafe']); // F-10968
+  assert.deepEqual(normalizeSource('forum.example/thread/88'), { // F-10930
+    source: { raw: 'forum.example/thread/88', href: 'https://forum.example/thread/88', status: 'scheme_assumed' },
+    flags: ['source_scheme_assumed'],
+    dedupeKey: 'https://forum.example/thread/88',
+  });
+  assert.deepEqual(normalizeSource(''), { source: { raw: '', href: null, status: 'missing' }, flags: ['source_missing'], dedupeKey: '' }); // F-10381
+});
+
+test('source: ordinary http(s) URLs are links, as collected', () => {
+  const tracked = 'https://chat.example/65984?utm_source=telegram&utm_medium=share';
+  assert.deepEqual(normalizeSource(tracked).source, { raw: tracked, href: tracked, status: 'ok' });
+  assert.deepEqual(normalizeSource(tracked).flags, []);
+  assert.deepEqual(normalizeSource('HTTP://Forum.Example/x').source, { raw: 'HTTP://Forum.Example/x', href: 'http://forum.example/x', status: 'ok' });
+  assert.equal(normalizeSource(' https://forum.example/1 ').source.raw, ' https://forum.example/1 ', 'raw is untrimmed');
+  assert.equal(normalizeSource(' https://forum.example/1 ').source.href, 'https://forum.example/1');
+});
+
+test('source: a host and port without a scheme is not mistaken for a scheme', () => {
+  assert.deepEqual(normalizeSource('forum.example:8080/x').source, { raw: 'forum.example:8080/x', href: 'https://forum.example:8080/x', status: 'scheme_assumed' });
+});
+
+test('source: other schemes are never links', () => {
+  for (const value of ['file:///etc/passwd', 'vbscript:x', ' javascript:alert(1)', 'JavaScript:alert(1)', 'mailto:a@b.example', 'localhost:8080']) {
+    const { source, flags } = normalizeSource(value);
+    assert.deepEqual(source, { raw: value, href: null, status: 'unsafe' }, value);
+    assert.deepEqual(flags, ['source_unsafe']);
+  }
+});
+
+test('source: invalid and missing', () => {
+  for (const value of ['http://', 'https://exa mple.example/', 'not a url', '//evil.example/x', '/relative/path', 'forum example/x']) {
+    const { source, flags } = normalizeSource(value);
+    assert.deepEqual(source, { raw: value, href: null, status: 'invalid' }, value);
+    assert.deepEqual(flags, ['source_invalid']);
+  }
+  for (const value of [undefined, null, 42, ['https://forum.example/1'], '   ']) {
+    const { source, flags } = normalizeSource(value);
+    assert.equal(source.status, 'missing', String(value));
+    assert.equal(source.href, null);
+    assert.deepEqual(flags, ['source_missing']);
+  }
+  assert.equal(normalizeSource(42).source.raw, '');
+  assert.equal(normalizeSource('   ').source.raw, '   ');
+});
+
+test('source: the duplicate key ignores tracking parameters, fragments and trailing slashes', () => {
+  const key = (value) => normalizeSource(value).dedupeKey;
+  const base = key('https://chat.example/65984');
+  assert.equal(base, 'https://chat.example/65984');
+  for (const same of [
+    'https://chat.example/65984?utm_source=telegram&utm_medium=share',
+    'https://chat.example/65984/',
+    'https://chat.example/65984//',
+    'https://CHAT.example/65984#top',
+    'https://chat.example/65984?UTM_Campaign=x',
+  ]) {
+    assert.equal(key(same), base, same);
+  }
+  assert.notEqual(key('https://chat.example/65985'), base);
+  assert.notEqual(key('http://chat.example/65984'), base);
+  assert.equal(key('https://chat.example/'), 'https://chat.example/');
+  assert.equal(key('https://chat.example/x?a=b%20c&utm_source=t'), key('https://chat.example/x?a=b+c'));
+  assert.notEqual(key('https://chat.example/x?a=1'), key('https://chat.example/x?a=2'));
+  assert.equal(key(' javascript:alert(1) '), 'javascript:alert(1)', 'without an href the key is the trimmed text');
 });

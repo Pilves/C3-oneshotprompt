@@ -24,6 +24,10 @@ const EMAIL = /^[^\s@]+@([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*$/
 const DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*$/i;
 const CASE_ID = /^C-\d+$/;
 const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+const HTTP_URL = /^https?:\/\//i;
+const ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const HOST_AND_PORT = /^[a-z0-9.-]+\.[a-z]{2,}:\d+(\/|$)/i;
+const SCHEMELESS_URL = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(:\d+)?(\/\S*)?$/i;
 const LABEL_SYNONYMS = { ipv4: 'ip', ipv6: 'ip' };
 // Types that have no checkable syntax, so the label is the only evidence and is trusted.
 const LABEL_ONLY_TYPES = ['handle', 'alias', 'wallet'];
@@ -114,4 +118,41 @@ function isValidIsoDateTime(text) {
   const [y, mo, d, h, mi, s, oh, om] = m.slice(1).map((group) => Number(group ?? 0));
   const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
   return mo >= 1 && mo <= 12 && d >= 1 && d <= daysInMonth && h <= 23 && mi <= 59 && s <= 59 && oh <= 23 && om <= 59;
+}
+
+/**
+ * Decides whether a source can be offered as a link. Only http(s) URLs get an href; everything
+ * else is kept as text.
+ * @param {unknown} value the record's sourceUrl
+ * @returns {{ source: { raw: string, href: string|null, status: string }, flags: string[], dedupeKey: string }}
+ */
+export function normalizeSource(value) {
+  const raw = typeof value === 'string' ? value : '';
+  const text = raw.trim();
+  const plain = (status, flag) => ({ source: { raw, href: null, status }, flags: [flag], dedupeKey: text });
+  const linked = (url, status, flags) => ({ source: { raw, href: url.href, status }, flags, dedupeKey: dedupeKey(url) });
+
+  if (text === '') return plain('missing', 'source_missing');
+  if (HTTP_URL.test(text)) {
+    const url = URL.parse(text);
+    return url?.hostname ? linked(url, 'ok', []) : plain('invalid', 'source_invalid');
+  }
+  // `forum.example:8080/x` also looks like a scheme followed by a colon.
+  if (ANY_SCHEME.test(text) && !HOST_AND_PORT.test(text)) return plain('unsafe', 'source_unsafe');
+  if (SCHEMELESS_URL.test(text)) {
+    const url = URL.parse(`https://${text}`);
+    if (url) return linked(url, 'scheme_assumed', ['source_scheme_assumed']);
+  }
+  return plain('invalid', 'source_invalid');
+}
+
+/** The same page whether or not it was shared with tracking parameters, a fragment or a trailing slash. */
+function dedupeKey(url) {
+  const key = new URL(url.href);
+  // Rebuilt even without utm_* parameters, so that both sides of a comparison are encoded the same way.
+  key.search = new URLSearchParams([...key.searchParams].filter(([name]) => !name.toLowerCase().startsWith('utm_'))).toString();
+  key.hash = '';
+  key.pathname = key.pathname.replace(/\/+$/, '') || '/';
+  // The URL parser has already lower-cased the host (http and https are special schemes).
+  return key.toString();
 }
