@@ -85,6 +85,11 @@ export function createMcpHandler({ store, config }) {
 function validateModernRequest(req, message, id) {
   const headerVersion = req.headers['mcp-protocol-version'];
   const methodHeader = req.headers['mcp-method'];
+  if (message.method === 'initialize') {
+    // `basic/versioning` › Backward Compatibility: name the supported versions, since a legacy client
+    // has no other way to find out. -32022 is also what a dual-era client recognises as "modern server".
+    return [400, unsupportedVersion(id, String(message.params?.protocolVersion ?? headerVersion ?? 'unknown'))];
+  }
   if (headerVersion === undefined) {
     return [400, rpcError(id, ERR.HEADER_MISMATCH, `Header mismatch: MCP-Protocol-Version header is required (supported: ${SUPPORTED_VERSIONS.join(', ')})`)];
   }

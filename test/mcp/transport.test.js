@@ -236,3 +236,25 @@ for (const method of ['foo/bar', 'ping', 'prompts/list', 'resources/list']) {
     assertError(await rpc(method, {}, { id: 'abc' }), 404, -32601, 'abc');
   });
 }
+
+const INITIALIZE = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'legacy', version: '1' } };
+
+test('initialize without any modern header → 400 -32022 naming the supported versions', async () => {
+  const response = await rpc('initialize', INITIALIZE, { meta: null, omitHeaders: ['MCP-Protocol-Version', 'Mcp-Method'] });
+  assertError(response, 400, -32022, 1);
+  assert.deepEqual(response.body.error.data.supported, ['2026-07-28']);
+  assert.equal(response.body.error.data.requested, '2025-11-25');
+});
+
+test('initialize with full modern headers and envelope → 400 -32022', async () => {
+  const response = await rpc('initialize', INITIALIZE);
+  assertError(response, 400, -32022, 1);
+  assert.deepEqual(response.body.error.data, { supported: ['2026-07-28'], requested: '2025-11-25' });
+});
+
+test('initialize without params.protocolVersion reports the header version, or "unknown"', async () => {
+  const withHeader = await rpc('initialize', {}, { meta: null, headers: { 'MCP-Protocol-Version': '2025-06-18' }, omitHeaders: ['Mcp-Method'] });
+  assert.equal(withHeader.body.error.data.requested, '2025-06-18');
+  const bare = await rpc('initialize', {}, { meta: null, omitHeaders: ['MCP-Protocol-Version', 'Mcp-Method'] });
+  assert.equal(bare.body.error.data.requested, 'unknown');
+});
