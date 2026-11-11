@@ -1,6 +1,6 @@
 import { fold, foldText } from './fold.js';
 import { GLOSSARY } from './glossary.js';
-import { UNASSIGNED } from './params.js';
+import { FINDING_TYPES, UNASSIGNED } from './params.js';
 
 const EXACT = 4;
 const STEM = 2;
@@ -60,6 +60,10 @@ export function search(index, params) {
     if (match !== null) matches.push({ entry, ...match });
   }
 
+  // Counted before the type filter, so the UI can show what each type choice would return.
+  const types = Object.fromEntries(FINDING_TYPES.map((type) => [type, 0]));
+  for (const { entry } of matches) types[entry.finding.type] += 1;
+
   const selected = params.types.length === 0 ? matches : matches.filter((m) => params.types.includes(m.entry.finding.type));
   selected.sort(terms.length > 0 ? byScore : byTime);
 
@@ -67,6 +71,7 @@ export function search(index, params) {
     total: selected.length,
     limit: params.limit,
     offset: params.offset,
+    facets: { types },
     results: selected.slice(params.offset, params.offset + params.limit).map(({ entry, score, highlights }) => ({
       ...entry.summary,
       score,
@@ -88,7 +93,11 @@ function passesFilters(entry, { includeDuplicates, caseId, from, to }) {
   return true;
 }
 
-/** Every term must match the entity or the notes (AND). Returns null when one does not. */
+/**
+ * Every term must match the entity or the notes (AND); returns null when one does not. A term
+ * scores variant weight × position factor in its better field, so an exact entity beats a prefix,
+ * a whole word beats a fragment, and a literal match beats a stem or a translation.
+ */
 function matchEntry(entry, variantLists) {
   let score = 0;
   const ranges = { entity: [], notes: [] };
@@ -98,13 +107,21 @@ function matchEntry(entry, variantLists) {
       const { text, starts, ends } = entry[field];
       const variant = variants.find((v) => text.includes(v.s));
       if (variant === undefined) continue;
-      termScore = Math.max(termScore, variant.w);
-      for (const at of occurrences(text, variant.s)) ranges[field].push([starts[at], ends[at + variant.s.length - 1]]);
+      const found = occurrences(text, variant.s);
+      termScore = Math.max(termScore, variant.w * positionFactor(field, text, variant, found));
+      for (const at of found) ranges[field].push([starts[at], ends[at + variant.s.length - 1]]);
     }
     if (termScore === 0) return null;
     score += termScore;
   }
   return { score, highlights: { entity: mergeRanges(ranges.entity), notes: mergeRanges(ranges.notes) } };
+}
+
+function positionFactor(field, text, variant, found) {
+  if (field === 'entity' && variant.w === EXACT && text === variant.s) return 4;
+  if (field === 'entity' && found[0] === 0) return 3;
+  if (found.some((at) => at === 0 || !/[a-z0-9]/.test(text[at - 1]))) return 2;
+  return 1;
 }
 
 function occurrences(text, s) {

@@ -152,6 +152,7 @@ test('zzzzqqq: nothing', () => {
   const result = run({ query: 'zzzzqqq' });
   assert.equal(result.total, 0);
   assert.deepEqual(result.results, []);
+  assert.deepEqual(result.facets.types, { domain: 0, ip: 0, email: 0, handle: 0, alias: 0, wallet: 0, unknown: 0 });
 });
 
 test('repeated terms count once', () => {
@@ -295,4 +296,111 @@ test('glossary variants come after stems, without repeats', () => {
   assert.deepEqual(termVariants('dome').map((v) => v.s), ['dome', 'domain', 'domeen'], 'a 4-letter prefix of a stem pulls in its group');
   assert.deepEqual(termVariants('dom').map((v) => v.s), ['dom'], 'a shorter one does not');
   assert.deepEqual(termVariants('198.51').map((v) => v.s), ['198.51']);
+});
+
+// ---- Ranking and facets ----
+
+test('ongitsus: every Estonian (literal) match ranks above every English (glossary) one', () => {
+  const result = runAll({ query: 'ongitsus' });
+  const lastEstonian = result.results.findLastIndex((hit) => hit.notes === ESTONIAN_PHISHING);
+  const firstEnglish = result.results.findIndex(isEnglishPhishing);
+  assert.equal(lastEstonian, 62);
+  assert.equal(firstEnglish, 63);
+});
+
+test('phishing: English (literal) matches rank first', () => {
+  const result = runAll({ query: 'phishing' });
+  assert.equal(result.results.findLastIndex(isEnglishPhishing), 60);
+  assert.equal(result.results.findIndex((hit) => hit.notes === ESTONIAN_PHISHING), 61);
+});
+
+test('198.51.100.2: the exact entity first, then entities that start with it', () => {
+  const result = runAll({ query: '198.51.100.2' });
+  assert.equal(result.total, 11);
+  const [first, ...rest] = result.results;
+  assert.equal(first.entity, '198.51.100.2');
+  assert.equal(first.score, 16);
+  for (const hit of rest) {
+    assert.ok(hit.entity.startsWith('198.51.100.2'), hit.entity);
+    assert.equal(hit.score, 12);
+  }
+});
+
+test('c2: a whole word in the notes beats a fragment of hex digits', () => {
+  const result = runAll({ query: 'c2' });
+  assert.match(result.results[0].notes, /C2 range/);
+  const firstFragmentOnly = result.results.findIndex((hit) => !hit.notes.includes('C2 range'));
+  assert.ok(result.results.slice(0, firstFragmentOnly).every((hit) => hit.notes.includes('C2 range')));
+  assert.ok(result.results.slice(firstFragmentOnly).every((hit) => !hit.notes.includes('C2 range')));
+});
+
+test('score = variant weight x position factor, summed over terms', () => {
+  const small = smallIndex([
+    { entity: 'kask.test', notes: 'Õngitsus.' }, // F-1
+    { entity: 'kask.test.example' }, // F-2
+    { entity: 'x.kask.test' }, // F-3
+    { entity: 'xkask.test' }, // F-4
+    { entity: 'other.test', notes: 'See kask.test oli.' }, // F-5
+    { entity: 'other.test', notes: 'xkask.test' }, // F-6
+    { entity: 'other.test', notes: 'kask.test oli.' }, // F-7
+    { entity: 'xongits', notes: 'Phishing.' }, // F-8
+  ]);
+  const scores = (query) => Object.fromEntries(run({ query, limit: 100 }, small).results.map((hit) => [hit.id, hit.score]));
+  // Exact (4) x: equals the entity 4, starts the entity 3, word boundary 2, inside a word 1.
+  assert.deepEqual(scores('kask.test'), { 'F-1': 16, 'F-2': 12, 'F-3': 8, 'F-5': 8, 'F-7': 8, 'F-4': 4, 'F-6': 4 });
+  // Stem (2): "kask" at the start of the entity.
+  assert.equal(scores('kaskede')['F-1'], 6);
+  // Glossary (1): "ongits" starts F-1's notes (1 x 2). F-8's literal "phishing" (4 x 2) beats its glossary hit inside the entity (1 x 1).
+  assert.deepEqual(scores('phishing'), { 'F-8': 8, 'F-1': 2 });
+  // F-8 for "ongitsus": the stem "ongits" inside the entity (2 x 1) and the glossary "phish" starting the notes (1 x 2) tie.
+  assert.equal(scores('ongitsus')['F-8'], 2);
+  // Two terms add up.
+  assert.equal(scores('kask.test õngitsus')['F-1'], 16 + 8);
+});
+
+test('each field uses the first variant that occurs in it', () => {
+  const small = smallIndex([{ entity: 'domeeni.test', notes: 'Need domeenid on uued.' }]);
+  const [hit] = run({ query: 'domeenid' }, small).results;
+  // Entity: "domeenid" does not occur, so the stem "domeeni" is used: 2 x 3. Notes: exact at a word boundary: 4 x 2.
+  assert.equal(hit.score, 8);
+  assert.deepEqual(hit.highlights, { entity: [[0, 7]], notes: [[5, 13]] });
+});
+
+test('equal scores: newest first, then id', () => {
+  const small = smallIndex([
+    { entity: 'a.test', observedAt: '2026-09-10T10:00:00Z' },
+    { entity: 'a.test', observedAt: '2026-09-11T10:00:00Z', notes: 'different' },
+    { entity: 'a.test', observedAt: '2026-09-10T10:00:00Z', notes: 'different again' },
+    { entity: 'a.test', observedAt: 'never', notes: 'no time' },
+  ]);
+  assert.deepEqual(ids(run({ query: 'a.test' }, small)), ['F-2', 'F-1', 'F-3', 'F-4']);
+  assert.deepEqual(ids(run({ query: '' }, small)), ['F-2', 'F-1', 'F-3', 'F-4']);
+});
+
+test('highlights: all occurrences, merged when they touch or overlap', () => {
+  const small = smallIndex([{ entity: 'abab.test', notes: 'Ö-öö ab ab' }]);
+  const [hit] = run({ query: 'ab abab öö' }, small).results;
+  assert.deepEqual(hit.highlights.entity, [[0, 4]]);
+  assert.deepEqual(hit.highlights.notes, [[2, 4], [5, 7], [8, 10]]);
+});
+
+test('facets: per-type counts before the type filter, after every other filter', () => {
+  const all = run({ query: 'ongitsus' });
+  const sum = (types) => Object.values(types).reduce((a, b) => a + b, 0);
+  assert.deepEqual(Object.keys(all.facets.types), ['domain', 'ip', 'email', 'handle', 'alias', 'wallet', 'unknown']);
+  assert.equal(sum(all.facets.types), all.total);
+
+  const ipOnly = run({ query: 'ongitsus', types: ['ip'] });
+  assert.deepEqual(ipOnly.facets, all.facets, 'the type filter does not change the facets');
+  assert.equal(ipOnly.total, all.facets.types.ip);
+
+  const inCase = run({ query: 'ongitsus', caseId: 'C-104', types: ['wallet'] });
+  const inCaseAll = run({ query: 'ongitsus', caseId: 'C-104' });
+  assert.deepEqual(inCase.facets, inCaseAll.facets);
+  assert.equal(sum(inCase.facets.types), inCaseAll.total);
+  assert.ok(sum(inCase.facets.types) < sum(all.facets.types), 'the case filter does change them');
+
+  const withCopies = run({ query: '', includeDuplicates: true });
+  assert.equal(sum(withCopies.facets.types), 1032);
+  assert.deepEqual(withCopies.facets.types, { domain: 179, ip: 172, email: 175, handle: 156, alias: 165, wallet: 184, unknown: 1 });
 });
