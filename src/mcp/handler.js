@@ -23,6 +23,7 @@ const TOO_LARGE = Symbol('too large');
  */
 export function createMcpHandler({ store, config, now = Date.now }) {
   const streams = new Set();
+  let closing = false;
   const takeCall = createRateLimiter(config.mcpRateLimitPerMinute, now);
 
   async function handler(req, res) {
@@ -179,8 +180,9 @@ export function createMcpHandler({ store, config, now = Date.now }) {
         res.end();
       },
     };
-    // Over the cap the stream is closed gracefully at once, which tells the client it ended rather than failed.
-    if (streams.size >= MAX_LISTEN_STREAMS) return stream.end();
+    // Over the cap, or once shutdown has begun, the stream is closed gracefully at once, which tells the client
+    // it ended rather than failed and keeps a late request from holding the server open.
+    if (closing || streams.size >= MAX_LISTEN_STREAMS) return stream.end();
     timer = setInterval(() => res.write(':\n\n'), KEEP_ALIVE_MS);
     timer.unref();
     streams.add(stream);
@@ -192,6 +194,7 @@ export function createMcpHandler({ store, config, now = Date.now }) {
   }
 
   handler.close = () => {
+    closing = true;
     for (const stream of streams) stream.end();
   };
   handler.openStreamCount = () => streams.size;

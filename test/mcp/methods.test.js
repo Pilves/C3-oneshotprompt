@@ -294,6 +294,16 @@ test('handler.close() answers the listen request and ends the stream', async () 
   assert.equal(handler.openStreamCount(), 0);
 });
 
+test('a listen stream opened after handler.close() is completed and ended at once', async () => {
+  const { url, handler } = await start();
+  handler.close();
+  const late = await openListen(url, 'late');
+  assertAcknowledged(await late.nextEvent(), 'late');
+  assertCompleted(await late.nextEvent(), 'late');
+  assert.equal(await late.nextEvent(), null);
+  assert.equal(handler.openStreamCount(), 0);
+});
+
 test('the 17th listen stream is acknowledged, completed and ended at once', async () => {
   const { url, handler } = await start();
   const abort = new AbortController();
