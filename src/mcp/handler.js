@@ -6,6 +6,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const CACHE_HINTS = { ttlMs: 3_600_000, cacheScope: 'public' };
 const MAX_LISTEN_STREAMS = 16;
 const KEEP_ALIVE_MS = 25_000;
+const RATE_WINDOW_MS = 60_000;
 const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 const JSON_MEDIA_TYPE = /^application\/json\s*(?:;|$)/i;
 const TOO_LARGE = Symbol('too large');
@@ -13,12 +14,13 @@ const TOO_LARGE = Symbol('too large');
 /**
  * Streamable HTTP endpoint for revision 2026-07-28. Stateless: every request is validated and answered on its own.
  * Host and Origin are checked by the caller before this runs.
- * @param {{ store: object, config: { mcpRateLimitPerMinute: number } }} options
+ * @param {{ store: object, config: { mcpRateLimitPerMinute: number }, now?: () => number }} options  `now` is injectable for tests
  * @returns {((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>)
  *   & { close(): void, openStreamCount(): number }}  close() ends every open listen stream (for shutdown)
  */
-export function createMcpHandler({ store, config }) {
+export function createMcpHandler({ store, config, now = Date.now }) {
   const streams = new Set();
+  const takeCall = createRateLimiter(config.mcpRateLimitPerMinute, now);
 
   async function handler(req, res) {
     try {
@@ -111,6 +113,11 @@ export function createMcpHandler({ store, config }) {
       return [400, rpcError(id, ERR.HEADER_MISMATCH, `Header mismatch: Mcp-Name header does not match params.name ${JSON.stringify(name)}`)];
     }
     if (!TOOL_NAMES.has(name)) return [200, rpcError(id, ERR.INVALID_PARAMS, `Unknown tool: ${name}`)];
+    const retryAfter = takeCall(req.socket.remoteAddress);
+    if (retryAfter !== null) {
+      // No error code exists for this; a tool result is the one channel the model is sure to see.
+      return [200, rpcResult(id, { content: [{ type: 'text', text: `Rate limit exceeded. Retry in ${retryAfter} seconds.` }], isError: true })];
+    }
     return [200, rpcResult(id, callTool(store, name, args ?? {}))];
   }
 
@@ -204,6 +211,30 @@ function metaOf(message) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Fixed window per client address (`server/tools` › Security Considerations asks for a rate limit).
+ * @returns {(key: string|undefined) => number|null}  null when the call is allowed, else seconds until the window resets
+ */
+function createRateLimiter(limitPerWindow, now) {
+  const windows = new Map();
+  return (key) => {
+    if (limitPerWindow === 0) return null;
+    const time = now();
+    // Dropping every expired window here keeps the map as small as the set of recent callers.
+    for (const [address, window] of windows) {
+      if (time - window.start >= RATE_WINDOW_MS) windows.delete(address);
+    }
+    let window = windows.get(key);
+    if (window === undefined) {
+      window = { start: time, count: 0 };
+      windows.set(key, window);
+    }
+    if (window.count >= limitPerWindow) return Math.ceil((window.start + RATE_WINDOW_MS - time) / 1000);
+    window.count += 1;
+    return null;
+  };
 }
 
 function writeEvent(res, message) {

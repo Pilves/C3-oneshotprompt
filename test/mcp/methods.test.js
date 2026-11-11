@@ -312,3 +312,27 @@ test('the 17th listen stream is acknowledged, completed and ended at once', asyn
   abort.abort();
   await waitFor(() => handler.openStreamCount() === 0);
 });
+
+test('tool calls are rate-limited per address in a fixed window', async () => {
+  let clock = 1_000_000;
+  const { rpc } = await start({ config: { mcpRateLimitPerMinute: 2 }, now: () => clock });
+  const call = async () => assertResult(await rpc('tools/call', { name: 'list_cases', arguments: {} }));
+  assert.equal((await call()).isError, undefined);
+  assert.equal((await call()).isError, undefined);
+  // Other methods are not counted.
+  assertResult(await rpc('tools/list'));
+  const limited = await call();
+  assert.equal(limited.isError, true);
+  assert.deepEqual(limited.content, [{ type: 'text', text: 'Rate limit exceeded. Retry in 60 seconds.' }]);
+  clock += 30_000;
+  assert.equal((await call()).content[0].text, 'Rate limit exceeded. Retry in 30 seconds.');
+  clock += 30_000;
+  assert.equal((await call()).isError, undefined);
+});
+
+test('a rate limit of 0 disables limiting', async () => {
+  const { rpc } = await start({ config: { mcpRateLimitPerMinute: 0 }, now: () => 0 });
+  for (let i = 0; i < 5; i++) {
+    assert.equal(assertResult(await rpc('tools/call', { name: 'list_cases', arguments: {} })).isError, undefined);
+  }
+});
