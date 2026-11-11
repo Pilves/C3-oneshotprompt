@@ -1,8 +1,10 @@
 import { fold, foldText } from './fold.js';
+import { GLOSSARY } from './glossary.js';
 import { UNASSIGNED } from './params.js';
 
 const EXACT = 4;
 const STEM = 2;
+const GLOSSARY_WEIGHT = 1;
 
 /**
  * Folds every searchable field once, so a query is a linear scan with indexOf.
@@ -22,8 +24,9 @@ export function createIndex(findings) {
 }
 
 /**
- * The strings tried for one folded query term, most specific first. Stems are crude suffix
- * stripping: enough for Estonian case endings and English plurals, never shorter than 4 letters.
+ * The strings tried for one folded query term, most specific first: the term itself, its stems,
+ * then translations. Stems are crude suffix stripping: enough for Estonian case endings and
+ * English plurals, never shorter than 4 letters.
  * @param {string} term already folded
  * @returns {{ s: string, w: number }[]}
  */
@@ -31,6 +34,13 @@ export function termVariants(term) {
   const variants = [{ s: term, w: EXACT }];
   if (/^\p{L}+$/u.test(term) && term.length >= 5) {
     for (let k = 1; k <= 3 && term.length - k >= 4; k++) variants.push({ s: term.slice(0, -k), w: STEM });
+  }
+  for (const group of GLOSSARY) {
+    // A short prefix such as "dom" is too ambiguous to pull in a whole group; "dome" is not.
+    if (!group.some((stem) => term.startsWith(stem) || (term.length >= 4 && stem.startsWith(term)))) continue;
+    for (const stem of group) {
+      if (!variants.some((v) => v.s === stem)) variants.push({ s: stem, w: GLOSSARY_WEIGHT });
+    }
   }
   return variants;
 }

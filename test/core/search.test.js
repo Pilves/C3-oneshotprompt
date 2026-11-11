@@ -5,6 +5,7 @@ import { ingest } from '../../src/core/ingest.js';
 import { createIndex, search, termVariants } from '../../src/core/search.js';
 import { parseSearchParams } from '../../src/core/params.js';
 import { foldText } from '../../src/core/fold.js';
+import { GLOSSARY } from '../../src/core/glossary.js';
 
 const readFile = () => JSON.parse(readFileSync(new URL('../../findings.json', import.meta.url), 'utf8'));
 const fileRecords = readFile().findings;
@@ -96,11 +97,15 @@ test('domeenid: plural finds the singular', () => {
   }
 });
 
-test('rünnakule: a stem finds rünnakut', () => {
+test('rünnakule: a stem finds rünnakut, the glossary finds the English note', () => {
   const result = runAll({ query: 'rünnakule' });
   const estonian = result.results.filter((hit) => hit.notes.endsWith('enne rünnakut.'));
+  const english = result.results.filter((hit) => hit.notes === 'Registered three days before the incident.');
   assert.equal(estonian.length, 56);
+  assert.equal(english.length, 67);
+  assert.equal(result.total, estonian.length + english.length);
   for (const hit of estonian) assert.equal(sliceOf(hit, 'notes'), 'rünnaku');
+  for (const hit of english) assert.equal(sliceOf(hit, 'notes'), 'incident');
 });
 
 test('0xc008: a wallet prefix', () => {
@@ -237,11 +242,57 @@ test('a 200-character query of single letters', () => {
 });
 
 test('stem variants: only purely alphabetic terms of five or more letters', () => {
-  assert.deepEqual(termVariants('sisselogimine').map((v) => [v.s, v.w]), [
+  assert.deepEqual(termVariants('sisselogimine').filter((v) => v.w > 1).map((v) => [v.s, v.w]), [
     ['sisselogimine', 4], ['sisselogimin', 2], ['sisselogimi', 2], ['sisselogim', 2],
   ]);
   assert.deepEqual(termVariants('kaske').map((v) => v.s), ['kaske', 'kask']);
   assert.deepEqual(termVariants('kask').map((v) => v.s), ['kask']);
   assert.deepEqual(termVariants('198.51.100.2').map((v) => v.s), ['198.51.100.2']);
   assert.deepEqual(termVariants('ip-aadress').map((v) => v.s), ['ip-aadress']);
+});
+
+const ESTONIAN_PHISHING = 'Kasutaja märgiti õngitsuskampaanias.';
+const isEnglishPhishing = (hit) => hit.notes === `Seen in phishing kit config for ${hit.entity}.`;
+
+test('ongitsus: finds the Estonian note and, through the glossary, the English one', () => {
+  const result = runAll({ query: 'ongitsus' });
+  const estonian = result.results.filter((hit) => hit.notes === ESTONIAN_PHISHING);
+  const english = result.results.filter(isEnglishPhishing);
+  assert.deepEqual([estonian.length, english.length, result.total], [63, 61, 124]);
+  for (const hit of estonian) assert.equal(sliceOf(hit, 'notes'), 'õngitsus');
+  for (const hit of english) assert.equal(sliceOf(hit, 'notes'), 'phish');
+});
+
+test('phishing: the same findings as ongitsus', () => {
+  const phishing = runAll({ query: 'phishing' });
+  assert.deepEqual(ids(phishing).toSorted(), ids(runAll({ query: 'ongitsus' })).toSorted());
+  for (const hit of phishing.results.filter((h) => h.notes === ESTONIAN_PHISHING)) assert.equal(sliceOf(hit, 'notes'), 'õngits');
+  for (const hit of phishing.results.filter(isEnglishPhishing)) assert.equal(sliceOf(hit, 'notes'), 'phishing');
+});
+
+test('õngitsemine: an inflection that only the glossary stem covers still finds both languages', () => {
+  assert.deepEqual(ids(runAll({ query: 'õngitsemine' })).toSorted(), ids(runAll({ query: 'ongitsus' })).toSorted());
+});
+
+test('glossary entries are folded, so they can match folded text', () => {
+  for (const group of GLOSSARY) {
+    assert.ok(group.length > 0);
+    for (const stem of group) {
+      assert.equal(stem, foldText(stem), stem);
+      assert.match(stem, /^[a-z]+$/, stem);
+    }
+  }
+});
+
+test('glossary variants come after stems, without repeats', () => {
+  assert.deepEqual(termVariants('phishing').map((v) => [v.s, v.w]), [
+    ['phishing', 4], ['phishin', 2], ['phishi', 2], ['phish', 2], ['ongits', 1],
+  ]);
+  assert.deepEqual(termVariants('ongitsus').map((v) => [v.s, v.w]), [
+    ['ongitsus', 4], ['ongitsu', 2], ['ongits', 2], ['ongit', 2], ['phish', 1],
+  ]);
+  assert.deepEqual(termVariants('login').map((v) => v.s), ['login', 'logi', 'log', 'journal', 'zurnaal', 'sisselogi']);
+  assert.deepEqual(termVariants('dome').map((v) => v.s), ['dome', 'domain', 'domeen'], 'a 4-letter prefix of a stem pulls in its group');
+  assert.deepEqual(termVariants('dom').map((v) => v.s), ['dom'], 'a shorter one does not');
+  assert.deepEqual(termVariants('198.51').map((v) => v.s), ['198.51']);
 });
