@@ -53,3 +53,29 @@ export function safeHref(source) {
   // against the page's own URL instead of the way they were checked here.
   return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
 }
+
+/**
+ * Query string for GET /api/findings. Empty values are left out so the server applies its defaults.
+ * @param {{ q?: string, types?: string[], case?: string, from?: string, to?: string, dups?: boolean, offset?: number }} state
+ * @returns {string}
+ */
+export function buildSearchQuery(state) {
+  return encodeParams([
+    ...filterParams(state),
+    ['includeDuplicates', state.dups ? 'true' : ''],
+    ['offset', state.offset ? String(state.offset) : ''],
+  ]);
+}
+
+function filterParams(state) {
+  return [['q', state.q], ['type', state.types?.join(',')], ['case', state.case], ['from', state.from], ['to', state.to]];
+}
+
+function encodeParams(pairs) {
+  return pairs
+    .filter(([, value]) => value)
+    // toWellFormed: encodeURIComponent throws on a lone surrogate, which a pasted query can contain.
+    // Commas stay readable; they only ever separate types, and the server decodes them either way.
+    .map(([key, value]) => `${key}=${encodeURIComponent(value.toWellFormed()).replaceAll('%2C', ',')}`)
+    .join('&');
+}

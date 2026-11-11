@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { splitByRanges, safeHref } from '../../public/highlight.js';
+import { splitByRanges, safeHref, buildSearchQuery } from '../../public/highlight.js';
+import { parseSearchParams } from '../../src/core/params.js';
 
 const joined = (parts) => parts.map((p) => p.text).join('');
 const hits = (parts) => parts.filter((p) => p.hit).map((p) => p.text);
@@ -125,4 +126,48 @@ test('safeHref handles a missing source', () => {
   assert.equal(safeHref(undefined), null);
   assert.equal(safeHref({}), null);
   assert.equal(safeHref({ raw: '', href: null, status: 'missing' }), null);
+});
+
+test('buildSearchQuery omits empty values', () => {
+  assert.equal(buildSearchQuery({}), '');
+  assert.equal(buildSearchQuery({ q: '', types: [], case: '', from: '', to: '', dups: false, offset: 0 }), '');
+  assert.equal(buildSearchQuery({ q: 'ongitsus' }), 'q=ongitsus');
+  assert.equal(buildSearchQuery({ q: '', offset: 20 }), 'offset=20');
+});
+
+test('buildSearchQuery maps every field to the API parameter name', () => {
+  const query = buildSearchQuery({
+    q: 'õngitsus & co #1 100%', types: ['domain', 'ip'], case: 'C-104', from: '2026-10-01', to: '2026-10-31', dups: true, offset: 40,
+  });
+  assert.equal(
+    query,
+    'q=%C3%B5ngitsus%20%26%20co%20%231%20100%25&type=domain,ip&case=C-104&from=2026-10-01&to=2026-10-31&includeDuplicates=true&offset=40',
+  );
+  const params = new URLSearchParams(query);
+  assert.equal(params.get('q'), 'õngitsus & co #1 100%');
+  assert.equal(params.get('type'), 'domain,ip');
+});
+
+test('buildSearchQuery survives a lone surrogate', () => {
+  assert.equal(new URLSearchParams(buildSearchQuery({ q: 'a\uD800b' })).get('q'), 'a�b');
+});
+
+test('buildSearchQuery output is accepted by the shared parameter validator', () => {
+  // The same mapping as GET /api/findings (implementation plan 4.3).
+  const names = { q: 'query', type: 'types', case: 'caseId' };
+  const toInput = (query) => Object.fromEntries([...new URLSearchParams(query)].map(([k, v]) => [names[k] ?? k, v]));
+  const parsed = parseSearchParams(toInput(buildSearchQuery({
+    q: ' Šokolaadimees ', types: ['handle', 'alias'], case: 'unassigned', from: '2026-09-01', to: '2026-09-30', dups: true, offset: 20,
+  })));
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.value, {
+    query: 'Šokolaadimees',
+    types: ['handle', 'alias'],
+    caseId: 'unassigned',
+    from: Date.parse('2026-09-01T00:00:00.000Z'),
+    to: Date.parse('2026-09-30T23:59:59.999Z'),
+    limit: 20,
+    offset: 20,
+    includeDuplicates: true,
+  });
 });
