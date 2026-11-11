@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FINDING_TYPES, splitByRanges, safeHref, buildSearchQuery } from '../../public/highlight.js';
+import { FINDING_TYPES, splitByRanges, safeHref, buildSearchQuery, parseHash, formatHash } from '../../public/highlight.js';
 import { FINDING_TYPES as CORE_TYPES, parseSearchParams } from '../../src/core/params.js';
 
 test('the UI offers the same types, in the same order, as the core', () => {
@@ -174,4 +174,61 @@ test('buildSearchQuery output is accepted by the shared parameter validator', ()
     offset: 20,
     includeDuplicates: true,
   });
+});
+
+const DEFAULT_SEARCH = { view: 'search', q: '', types: [], case: '', from: '', to: '', dups: false, offset: 0 };
+
+test('parseHash defaults to an empty search', () => {
+  for (const hash of ['', '#', '#/', '#/search', '#/search?', '#/unknown', '#section', '#/finding/', undefined]) {
+    assert.deepEqual(parseHash(hash), DEFAULT_SEARCH, String(hash));
+  }
+  assert.equal(formatHash(DEFAULT_SEARCH), '#/search');
+  assert.equal(formatHash({ view: 'search' }), '#/search');
+});
+
+test('parseHash reads every search field', () => {
+  assert.deepEqual(
+    parseHash('#/search?q=ongitsus&type=ip,domain&case=C-104&from=2026-10-01&to=2026-10-31&dups=1&offset=20'),
+    { view: 'search', q: 'ongitsus', types: ['domain', 'ip'], case: 'C-104', from: '2026-10-01', to: '2026-10-31', dups: true, offset: 20 },
+  );
+});
+
+test('search routes round-trip through the hash', () => {
+  const routes = [
+    { ...DEFAULT_SEARCH, q: 'a&b=c #1 100% õngitsus + ŠOKOLAADIMEES' },
+    { ...DEFAULT_SEARCH, q: '%E0%A4%A' },
+    { ...DEFAULT_SEARCH, q: '<script>', types: ['handle', 'alias'], case: 'unassigned', dups: true, offset: 40 },
+    { ...DEFAULT_SEARCH, types: [...FINDING_TYPES], case: 'C-122', from: '2026-09-01', to: '2026-09-01' },
+  ];
+  for (const route of routes) {
+    const hash = formatHash(route);
+    assert.deepEqual(parseHash(hash), route, hash);
+    assert.equal(formatHash(parseHash(hash)), hash);
+  }
+});
+
+test('finding routes round-trip through the hash', () => {
+  for (const id of ['F-10327', 'F-10578-2', 'F-1/2?x=1#y', 'õ %41 &']) {
+    const hash = formatHash({ view: 'finding', id });
+    assert.match(hash, /^#\/finding\/[^/?#]+$/);
+    assert.deepEqual(parseHash(hash), { view: 'finding', id });
+  }
+  assert.equal(formatHash({ view: 'finding', id: 'F-10578-2' }), '#/finding/F-10578-2');
+});
+
+test('parseHash keeps a finding id with a broken escape as typed', () => {
+  assert.deepEqual(parseHash('#/finding/%E0%A4%A'), { view: 'finding', id: '%E0%A4%A' });
+});
+
+test('parseHash normalises what the form can show and drops what it cannot', () => {
+  const route = parseHash('#/search?q=%20x%20&type=IP&type=banana,%20Wallet,ip&case=%20c-104%20&from=2026-10-01T10:00Z&to=yesterday&dups=true&offset=-5');
+  assert.deepEqual(route, { ...DEFAULT_SEARCH, q: 'x', types: ['ip', 'wallet'], case: 'C-104' });
+  assert.equal(parseHash('#/search?case=UNASSIGNED').case, 'unassigned');
+  assert.equal(parseHash('#/search?offset=abc').offset, 0);
+  assert.equal(parseHash('#/search?q=a+b').q, 'a b');
+});
+
+test('the hash and the API query carry the same search', () => {
+  const route = parseHash('#/search?q=fail%20serverist&type=domain&case=C-104&from=2026-10-01&dups=1&offset=20');
+  assert.equal(buildSearchQuery(route), 'q=fail%20serverist&type=domain&case=C-104&from=2026-10-01&includeDuplicates=true&offset=20');
 });

@@ -70,6 +70,67 @@ export function buildSearchQuery(state) {
   ]);
 }
 
+/**
+ * @typedef {{ view: 'search', q: string, types: string[], case: string, from: string, to: string, dups: boolean, offset: number }} SearchRoute
+ * @typedef {{ view: 'finding', id: string }} FindingRoute
+ */
+
+/**
+ * Reads the URL fragment: '#/finding/<id>', or '#/search?q=…&type=ip,domain&case=C-104&from=…&to=…&dups=1&offset=20'
+ * (also the default for an empty or unknown fragment). Values the form cannot show are dropped rather than
+ * applied invisibly; values it can show but the server may reject (a long q, a malformed case id) are kept,
+ * so the server's error message explains them.
+ * @param {string} hash
+ * @returns {SearchRoute | FindingRoute}
+ */
+export function parseHash(hash) {
+  const text = String(hash ?? '').replace(/^#/, '');
+  const finding = /^\/finding\/(.+)$/.exec(text);
+  if (finding) return { view: 'finding', id: decodeOrKeep(finding[1]) };
+
+  const queryStart = text.indexOf('?');
+  const params = new URLSearchParams(queryStart === -1 ? '' : text.slice(queryStart + 1));
+  const types = params.getAll('type').join(',').toLowerCase().split(',').map((t) => t.trim());
+  const caseId = (params.get('case') ?? '').trim();
+  const offset = params.get('offset') ?? '';
+  return {
+    view: 'search',
+    q: (params.get('q') ?? '').trim(),
+    types: FINDING_TYPES.filter((type) => types.includes(type)),
+    case: caseId.toLowerCase() === 'unassigned' ? 'unassigned' : caseId.toUpperCase(),
+    from: dateOrEmpty(params.get('from')),
+    to: dateOrEmpty(params.get('to')),
+    dups: params.get('dups') === '1',
+    offset: /^\d+$/.test(offset) ? Number(offset) : 0,
+  };
+}
+
+/**
+ * The inverse of parseHash. Missing search fields count as empty, so `{ view: 'search', case: 'C-104' }` works.
+ * @param {Partial<SearchRoute> | FindingRoute} route
+ * @returns {string}
+ */
+export function formatHash(route) {
+  if (route.view === 'finding') return `#/finding/${encodeURIComponent(route.id.toWellFormed())}`;
+  const query = encodeParams([
+    ...filterParams(route),
+    ['dups', route.dups ? '1' : ''],
+    ['offset', route.offset ? String(route.offset) : ''],
+  ]);
+  return query ? `#/search?${query}` : '#/search';
+}
+
+function decodeOrKeep(text) {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text; // A hand-edited fragment with a broken escape: look it up as typed.
+  }
+}
+
+// A date input can only hold YYYY-MM-DD, so anything else would filter without being visible.
+const dateOrEmpty = (value) => (/^\d{4}-\d{2}-\d{2}$/.test(value ?? '') ? value : '');
+
 function filterParams(state) {
   return [['q', state.q], ['type', state.types?.join(',')], ['case', state.case], ['from', state.from], ['to', state.to]];
 }

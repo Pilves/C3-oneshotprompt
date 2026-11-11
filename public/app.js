@@ -1,6 +1,6 @@
 // All text from the API is untrusted. It reaches the page only through textContent, text nodes
 // and property assignment; see docs/DESIGN.md section 7.
-import { FINDING_TYPES, splitByRanges, safeHref, buildSearchQuery } from './highlight.js';
+import { FINDING_TYPES, splitByRanges, safeHref, buildSearchQuery, parseHash, formatHash } from './highlight.js';
 
 // The data says handle and alias; the task says username and pseudonym (DESIGN.md T2).
 const TYPE_LABELS = { handle: 'handle (username)', alias: 'alias (pseudonym)' };
@@ -50,14 +50,19 @@ const ui = {
   searchView: byId('search-view'),
   detailView: byId('detail-view'),
   detail: byId('detail'),
+  back: byId('back'),
 };
 
 const typeInputs = new Map();
 const typeCounts = new Map();
 
-let state = { q: '', types: [], case: '', from: '', to: '', dups: false, offset: 0 };
+// The URL fragment is the state: every view is rendered from the parsed hash.
+let route = parseHash(location.hash);
+let lastSearch = parseHash('');
 let pageSize = 20;
+let inFlight = null;
 let typingTimer = 0;
+let typingEntry = false;
 
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -80,17 +85,26 @@ const utc = (iso, seconds) => `${iso.slice(0, seconds ? 19 : 16).replace('T', ' 
 const timeEl = (iso, seconds) => el('time', { dateTime: iso }, utc(iso, seconds));
 const flagBadge = (flag) => el('span', { className: 'badge flag', title: FLAG_TEXT[flag] ?? '' }, flag);
 const muted = (text) => el('span', { className: 'muted' }, text);
-const findingHash = (id) => `#/finding/${encodeURIComponent(id.toWellFormed())}`;
-const findingLink = (id) => el('a', { href: findingHash(id) }, id);
+const findingLink = (id) => el('a', { href: formatHash({ view: 'finding', id }) }, id);
+const caseLink = (caseId) => el('a', { href: formatHash({ view: 'search', case: caseId }) }, caseId);
 
-/** @returns {Promise<{ status: number, body: any }>} status 0 when the server could not be reached */
-async function getJson(url) {
+/**
+ * Fetches JSON for the current view. Starting a request aborts the previous one, and a response
+ * that is no longer the latest is dropped, so a slow answer can never overwrite a newer one.
+ * @returns {Promise<{ status: number, body: any } | null>} null when superseded; status 0 when the server could not be reached
+ */
+async function fetchLatest(url) {
+  inFlight?.abort();
+  const controller = new AbortController();
+  inFlight = controller;
+  let result;
   try {
-    const res = await fetch(url);
-    return { status: res.status, body: await res.json().catch(() => null) };
+    const res = await fetch(url, { signal: controller.signal });
+    result = { status: res.status, body: await res.json().catch(() => null) };
   } catch {
-    return { status: 0, body: null };
+    result = { status: 0, body: null };
   }
+  return controller === inFlight ? result : null;
 }
 
 function errorText({ status, body }) {
@@ -101,9 +115,10 @@ function errorText({ status, body }) {
   return details.length > 0 ? `${error.message}: ${details.join('; ')}` : String(error.message);
 }
 
-async function runSearch() {
-  const query = buildSearchQuery(state);
-  const res = await getJson(query ? `/api/findings?${query}` : '/api/findings');
+async function runSearch(search) {
+  const query = buildSearchQuery(search);
+  const res = await fetchLatest(query ? `/api/findings?${query}` : '/api/findings');
+  if (!res) return;
   if (res.status === 200 && res.body) renderResults(res.body);
   else showSearchError(errorText(res));
 }
@@ -132,7 +147,7 @@ function renderResults({ total, limit, offset, results, facets }) {
 
 function resultItem(f) {
   // Links to the detail view, never to the entity itself: it may be a live malicious domain.
-  const entity = el('a', { href: findingHash(f.id), className: 'entity' });
+  const entity = el('a', { href: formatHash({ view: 'finding', id: f.id }), className: 'entity' });
   if (f.entity) appendHighlighted(entity, f.entity, f.highlights?.entity);
   else entity.append('(no entity)');
   const notes = f.notes
@@ -140,7 +155,7 @@ function resultItem(f) {
     : el('p', { className: 'notes muted' }, '(no notes)');
   const meta = el('div', { className: 'meta' },
     el('span', null, f.id),
-    el('span', null, ...(f.caseIds.length > 0 ? joined(f.caseIds) : ['no case'])),
+    el('span', null, ...(f.caseIds.length > 0 ? joined(f.caseIds.map(caseLink)) : ['no case'])),
     el('span', null, f.observedAt ? timeEl(f.observedAt, false) : 'time unknown'));
   if (f.duplicates.length > 0) meta.append(el('span', null, `+${plural(f.duplicates.length, 'duplicate')}`));
   if (f.flags.length > 0) meta.append(el('span', { className: 'flags' }, ...f.flags.map(flagBadge)));
@@ -152,7 +167,8 @@ function resultItem(f) {
 
 async function showFinding(id) {
   ui.detail.replaceChildren(muted('Loading…'));
-  const res = await getJson(`/api/findings/${encodeURIComponent(id)}`);
+  const res = await fetchLatest(`/api/findings/${encodeURIComponent(id)}`);
+  if (!res) return;
   if (res.status === 200 && res.body) renderDetail(res.body);
   else ui.detail.replaceChildren(el('p', { className: 'error' }, res.status === 404 ? `No finding with id ${id}` : errorText(res)));
 }
@@ -164,7 +180,7 @@ function renderDetail(f) {
   row('Id', f.id, f.rawId !== f.id ? ` (in the source: ${f.rawId})` : '');
   row('Type', typeText(f));
   row('Entity', f.entity ? el('span', { className: 'entity' }, f.entity) : muted('none'));
-  row('Cases', ...(f.caseIds.length > 0 ? joined(f.caseIds) : [muted('none')]));
+  row('Cases', ...(f.caseIds.length > 0 ? joined(f.caseIds.map(caseLink)) : [muted('none')]));
   row('Observed', ...(f.observedAt
     ? [timeEl(f.observedAt, true), el('br'), `${TALLINN.format(new Date(f.observedAt))} Europe/Tallinn`]
     : [muted('unknown')]));
@@ -176,9 +192,14 @@ function renderDetail(f) {
   if (f.duplicateOf) row('Duplicate of', findingLink(f.duplicateOf));
   if (f.duplicates.length > 0) row('Duplicates', ...joined(f.duplicates.map((id) => findingLink(id))));
   if (f.sameRawId.length > 0) row('Same id in the source', ...joined(f.sameRawId.map((id) => findingLink(id))));
+  // The same entity often turns up in several cases; this is the pivot to all of them.
+  const pivot = f.entity
+    ? el('p', null, el('a', { href: formatHash({ view: 'search', q: f.entity }) }, 'Find other findings for this entity'))
+    : '';
   ui.detail.replaceChildren(
     heading,
     list,
+    pivot,
     el('h3', null, 'Original record'),
     el('pre', { textContent: JSON.stringify(f.raw, null, 2) }),
   );
@@ -203,27 +224,26 @@ function sourceNodes(source) {
   return source?.raw ? [el('code', null, source.raw), ' ', muted(`(${reason})`)] : [muted(reason)];
 }
 
-function route() {
-  const match = /^#\/finding\/(.+)$/.exec(location.hash);
-  ui.searchView.hidden = Boolean(match);
-  ui.detailView.hidden = !match;
-  if (!match) {
+function render(next) {
+  route = next;
+  const searching = route.view === 'search';
+  ui.searchView.hidden = !searching;
+  ui.detailView.hidden = searching;
+  if (searching) {
+    lastSearch = route;
     document.title = 'Findings search';
-    return;
+    syncForm(route);
+    runSearch(route);
+  } else {
+    document.title = `${route.id} · Findings search`;
+    ui.back.href = formatHash(lastSearch);
+    showFinding(route.id);
   }
-  let id = match[1];
-  try {
-    id = decodeURIComponent(id);
-  } catch {
-    // A hand-edited hash with broken escapes: look it up as typed.
-  }
-  document.title = `${id} · Findings search`;
-  showFinding(id);
 }
 
-function search() {
-  clearTimeout(typingTimer);
-  state = {
+function formRoute() {
+  return {
+    view: 'search',
     q: ui.q.value.trim(),
     types: FINDING_TYPES.filter((type) => typeInputs.get(type).checked),
     case: ui.caseSelect.value,
@@ -232,13 +252,46 @@ function search() {
     dups: ui.dups.checked,
     offset: 0,
   };
-  runSearch();
 }
 
-function page(offset) {
-  state = { ...state, offset };
-  runSearch();
-  window.scrollTo(0, 0);
+function syncForm(search) {
+  // Comparing trimmed values leaves the box alone while someone types a trailing space.
+  if (ui.q.value.trim() !== search.q) ui.q.value = search.q;
+  for (const [type, input] of typeInputs) input.checked = search.types.includes(type);
+  selectCase(search.case);
+  ui.from.value = search.from;
+  ui.to.value = search.to;
+  ui.dups.checked = search.dups;
+}
+
+function selectCase(caseId) {
+  // A case from the URL may arrive before the case list, or not be in it at all.
+  if (![...ui.caseSelect.options].some((option) => option.value === caseId)) {
+    ui.caseSelect.append(el('option', { value: caseId }, caseId));
+  }
+  ui.caseSelect.value = caseId;
+}
+
+/** Navigates by pushing a history entry; the hashchange handler renders. */
+function go(next) {
+  clearTimeout(typingTimer);
+  typingEntry = false;
+  const hash = formatHash(next);
+  if (hash !== location.hash) location.hash = hash;
+}
+
+/** @returns {boolean} whether the search changed */
+function commitTyping() {
+  clearTimeout(typingTimer);
+  const next = formRoute();
+  const hash = formatHash(next);
+  if (hash === location.hash) return false;
+  // The first update of a burst of typing adds a history entry and later ones replace it, so Back
+  // returns to the previous search instead of stepping through keystrokes. Neither fires hashchange.
+  history[typingEntry ? 'replaceState' : 'pushState'](null, '', hash);
+  typingEntry = true;
+  render(next);
+  return true;
 }
 
 async function loadCases() {
@@ -246,7 +299,9 @@ async function loadCases() {
     const res = await fetch('/api/cases');
     if (!res.ok) return;
     const { cases } = await res.json();
-    ui.caseSelect.append(...cases.map((c) => el('option', { value: c.caseId }, c.caseId)));
+    const fixed = [...ui.caseSelect.options].slice(0, 2); // "any" and "unassigned" from index.html
+    ui.caseSelect.replaceChildren(...fixed, ...cases.map((c) => el('option', { value: c.caseId }, c.caseId)));
+    selectCase(lastSearch.case);
   } catch {
     // The filter still offers "any" and "unassigned"; the search itself reports server problems.
   }
@@ -262,20 +317,31 @@ for (const type of FINDING_TYPES) {
 
 ui.q.addEventListener('input', () => {
   clearTimeout(typingTimer);
-  typingTimer = setTimeout(search, 250);
+  typingTimer = setTimeout(commitTyping, 250);
 });
 // The text box also fires change on blur; typing is handled above.
 ui.form.addEventListener('change', (event) => {
-  if (event.target !== ui.q) search();
+  if (event.target !== ui.q) go(formRoute());
 });
 ui.form.addEventListener('submit', (event) => {
   event.preventDefault();
-  search();
+  // Unchanged: search again, which is how to retry after a network error.
+  if (!commitTyping()) runSearch(route);
+  typingEntry = false;
 });
-ui.prev.addEventListener('click', () => page(Math.max(0, state.offset - pageSize)));
-ui.next.addEventListener('click', () => page(state.offset + pageSize));
-window.addEventListener('hashchange', route);
+ui.prev.addEventListener('click', () => {
+  go({ ...route, offset: Math.max(0, route.offset - pageSize) });
+  window.scrollTo(0, 0);
+});
+ui.next.addEventListener('click', () => {
+  go({ ...route, offset: route.offset + pageSize });
+  window.scrollTo(0, 0);
+});
+window.addEventListener('hashchange', () => {
+  clearTimeout(typingTimer);
+  typingEntry = false;
+  render(parseHash(location.hash));
+});
 
+render(route);
 loadCases();
-runSearch();
-route();
