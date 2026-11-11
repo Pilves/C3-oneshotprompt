@@ -7,9 +7,11 @@ import { TOOLS, INSTRUCTIONS, DATA_NOTICE, callTool } from '../../src/mcp/tools.
 const DATA_FILE = fileURLToPath(new URL('../../findings.json', import.meta.url));
 const RECORDS = JSON.parse(readFileSync(DATA_FILE, 'utf8')).findings;
 
-// The store is built in a parallel work package. Skip only when the module is absent, so a broken store still fails.
-const storeModule = await import('../../src/core/store.js').catch((err) => {
-  if (err.code === 'ERR_MODULE_NOT_FOUND') return null;
+// The store is built in a parallel work package. Skip only when store.js itself is absent: a store that fails to
+// load, including one importing a missing module (same error code, different url), must fail the suite.
+const STORE_URL = new URL('../../src/core/store.js', import.meta.url).href;
+const storeModule = await import(STORE_URL).catch((err) => {
+  if (err.code === 'ERR_MODULE_NOT_FOUND' && err.url === STORE_URL) return null;
   throw err;
 });
 const store = storeModule ? storeModule.loadStore(DATA_FILE) : null;
