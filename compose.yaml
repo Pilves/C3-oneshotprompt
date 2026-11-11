@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:${PORT:-3000}:3000" # loopback only: there is no authentication (docs/DESIGN.md section 8)
+    environment:
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
