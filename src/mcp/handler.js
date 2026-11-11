@@ -1,9 +1,10 @@
-import { ERR, META, SUPPORTED_VERSIONS, rpcError, rpcResult } from './protocol.js';
-import { INSTRUCTIONS, TOOLS } from './tools.js';
+import { ERR, META, SUPPORTED_VERSIONS, rpcError, rpcResult, decodeHeaderValue } from './protocol.js';
+import { INSTRUCTIONS, TOOLS, callTool } from './tools.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // The tool list is static and identical for every caller (`server/utilities/caching`).
 const CACHE_HINTS = { ttlMs: 3_600_000, cacheScope: 'public' };
+const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 const JSON_MEDIA_TYPE = /^application\/json\s*(?:;|$)/i;
 const TOO_LARGE = Symbol('too large');
 
@@ -64,14 +65,14 @@ export function createMcpHandler({ store, config }) {
     if (invalid) return sendJson(res, ...invalid);
 
     try {
-      return sendJson(res, ...dispatch(message, id));
+      return sendJson(res, ...dispatch(req, message, id));
     } catch (err) {
       console.error(`MCP ${message.method} failed:`, err);
       return sendJson(res, 500, rpcError(id, ERR.INTERNAL, 'Internal error'));
     }
   }
 
-  function dispatch(message, id) {
+  function dispatch(req, message, id) {
     switch (message.method) {
       case 'server/discover':
         return [200, rpcResult(id, { supportedVersions: SUPPORTED_VERSIONS, capabilities: { tools: {} }, instructions: INSTRUCTIONS, ...CACHE_HINTS })];
@@ -79,9 +80,29 @@ export function createMcpHandler({ store, config }) {
         // No cursor is ever issued, so any cursor is invalid (`server/utilities/pagination`).
         if (message.params.cursor !== undefined) return [200, rpcError(id, ERR.INVALID_PARAMS, 'Invalid cursor')];
         return [200, rpcResult(id, { tools: TOOLS, ...CACHE_HINTS })];
+      case 'tools/call':
+        return callToolRequest(req, message.params, id);
       default:
         return [404, rpcError(id, ERR.METHOD_NOT_FOUND, 'Method not found')];
     }
+  }
+
+  /** Order from plan 5.2: malformed params, then Mcp-Name, then unknown tool. */
+  function callToolRequest(req, params, id) {
+    const { name, arguments: args } = params;
+    if (typeof name !== 'string') return [200, rpcError(id, ERR.INVALID_PARAMS, 'Invalid params: name must be a string')];
+    if (args !== undefined && !isPlainObject(args)) {
+      return [200, rpcError(id, ERR.INVALID_PARAMS, 'Invalid params: arguments must be an object')];
+    }
+    const nameHeader = req.headers['mcp-name'];
+    if (nameHeader === undefined) {
+      return [400, rpcError(id, ERR.HEADER_MISMATCH, 'Header mismatch: Mcp-Name header is required for tools/call')];
+    }
+    if (decodeHeaderValue(nameHeader) !== name) {
+      return [400, rpcError(id, ERR.HEADER_MISMATCH, `Header mismatch: Mcp-Name header does not match params.name ${JSON.stringify(name)}`)];
+    }
+    if (!TOOL_NAMES.has(name)) return [200, rpcError(id, ERR.INVALID_PARAMS, `Unknown tool: ${name}`)];
+    return [200, rpcResult(id, callTool(store, name, args ?? {}))];
   }
 
   return handler;

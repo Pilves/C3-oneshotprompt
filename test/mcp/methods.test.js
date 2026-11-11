@@ -11,7 +11,37 @@ const ENVELOPE = {
   [META.clientInfo]: { name: 'methods-test', version: '0' },
 };
 
-const FAKE_STORE = {};
+const FINDING = {
+  id: 'F-1',
+  rawId: 'F-1',
+  type: 'ip',
+  typeRaw: 'ip',
+  entity: '198.51.100.7',
+  caseIds: ['C-101'],
+  observedAt: '2026-09-11T08:00:00.000Z',
+  notes: 'Observed beaconing.',
+  source: { raw: 'https://archive.example/1', href: 'https://archive.example/1', status: 'ok' },
+  flags: [],
+  duplicateOf: null,
+  duplicates: [],
+  sameRawId: [],
+};
+
+const FAKE_STORE = {
+  search: (params) => ({
+    total: 1,
+    limit: params.limit,
+    offset: params.offset,
+    results: [{ ...FINDING, score: 3, highlights: { entity: [[0, 3]], notes: [] } }],
+    facets: { types: {} },
+  }),
+  getFinding: (id) => (typeof id === 'string' && id.trim().toUpperCase() === 'F-1' ? { ...FINDING, raw: { id: 'F-1' } } : null),
+  listCases: () => ({
+    cases: [{ caseId: 'C-101', findingCount: 1, duplicateCount: 0, types: {}, firstObservedAt: null, lastObservedAt: null }],
+    unassigned: { findingCount: 0 },
+  }),
+  stats: {},
+};
 
 const servers = [];
 after(() => {
@@ -119,4 +149,70 @@ test('tools/list returns the three tools in order with schemas and annotations',
   assert.deepEqual(tools[0].inputSchema.properties.types.items.enum, ['domain', 'ip', 'email', 'handle', 'alias', 'wallet', 'unknown']);
   assert.deepEqual(tools[1].inputSchema.required, ['id']);
   assert.equal(tools[2].inputSchema.properties, undefined);
+});
+
+test('tools/call without Mcp-Name → 400 -32020', async () => {
+  const { rpc } = await shared;
+  const response = await rpc('tools/call', { name: 'list_cases', arguments: {} }, { omitHeaders: ['Mcp-Name'] });
+  assertError(response, 400, -32020);
+  assert.match(response.body.error.message, /Mcp-Name/);
+});
+
+test('tools/call with an Mcp-Name that differs from params.name → 400 -32020', async () => {
+  const { rpc } = await shared;
+  assertError(await rpc('tools/call', { name: 'list_cases', arguments: {} }, { headers: { 'Mcp-Name': 'get_finding' } }), 400, -32020);
+  assertError(await rpc('tools/call', { name: 'list_cases', arguments: {} }, { headers: { 'Mcp-Name': '=?base64?!!?=' } }), 400, -32020);
+});
+
+test('tools/call accepts a base64-encoded Mcp-Name', async () => {
+  const { rpc } = await shared;
+  const response = await rpc('tools/call', { name: 'search_findings', arguments: { query: 'x' } }, { headers: { 'Mcp-Name': '=?base64?c2VhcmNoX2ZpbmRpbmdz?=' } });
+  const result = assertResult(response);
+  assert.equal(result.isError, undefined);
+});
+
+test('tools/call with an unknown tool → 200 -32602', async () => {
+  const { rpc } = await shared;
+  const response = await rpc('tools/call', { name: 'delete_everything', arguments: {} });
+  assertError(response, 200, -32602);
+  assert.equal(response.body.error.message, 'Unknown tool: delete_everything');
+});
+
+test('tools/call without name, or with non-object arguments → 200 -32602', async () => {
+  const { rpc } = await shared;
+  assertError(await rpc('tools/call', { arguments: {} }), 200, -32602);
+  assertError(await rpc('tools/call', { name: 'list_cases', arguments: [] }), 200, -32602);
+  assertError(await rpc('tools/call', { name: 'list_cases', arguments: null }), 200, -32602);
+  assertError(await rpc('tools/call', { name: 'list_cases', arguments: 'x' }), 200, -32602);
+});
+
+test('tools/call without arguments: fine for list_cases, an isError result for search_findings', async () => {
+  const { rpc } = await shared;
+  const cases = assertResult(await rpc('tools/call', { name: 'list_cases' }));
+  assert.equal(cases.isError, undefined);
+  assert.equal(cases.structuredContent.cases[0].caseId, 'C-101');
+  const search = assertResult(await rpc('tools/call', { name: 'search_findings' }));
+  assert.equal(search.isError, true);
+  assert.equal(search.structuredContent, undefined);
+  assert.match(search.content[0].text, /query is required/);
+});
+
+test('tools/call returns structuredContent and the same JSON as text', async () => {
+  const { rpc } = await shared;
+  const result = assertResult(await rpc('tools/call', { name: 'search_findings', arguments: { query: '198' } }));
+  assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify(result.structuredContent) }]);
+  const [hit] = result.structuredContent.results;
+  assert.deepEqual(hit.matchedIn, ['entity']);
+  assert.equal('score' in hit, false);
+  assert.equal('highlights' in hit, false);
+});
+
+test('a tool that throws → 500 -32603 without detail', async (t) => {
+  const logged = t.mock.method(console, 'error', () => {});
+  const { rpc } = await start({ store: { ...FAKE_STORE, listCases: () => { throw new Error('secret detail'); } } });
+  const response = await rpc('tools/call', { name: 'list_cases', arguments: {} }, { id: 'boom' });
+  assertError(response, 500, -32603, 'boom');
+  assert.equal(response.body.error.message, 'Internal error');
+  assert.doesNotMatch(response.text, /secret detail/);
+  assert.equal(logged.mock.callCount(), 1);
 });
