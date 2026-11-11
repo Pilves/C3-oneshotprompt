@@ -101,3 +101,22 @@ test('tools/list with a cursor → -32602', async () => {
   assertError(response, 200, -32602);
   assert.match(response.body.error.message, /cursor/i);
 });
+
+test('tools/list returns the three tools in order with schemas and annotations', async () => {
+  const { rpc } = await shared;
+  const { tools } = assertResult(await rpc('tools/list'));
+  assert.deepEqual(tools.map((t) => t.name), ['search_findings', 'get_finding', 'list_cases']);
+  for (const tool of tools) {
+    assert.equal(typeof tool.title, 'string');
+    assert.equal(typeof tool.description, 'string');
+    assert.equal(tool.inputSchema.type, 'object');
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    assert.equal(tool.outputSchema.type, 'object');
+    assert.ok(Array.isArray(tool.outputSchema.required));
+    assert.deepEqual(tool.annotations, { readOnlyHint: true, openWorldHint: false });
+  }
+  assert.deepEqual(tools[0].inputSchema.required, ['query']);
+  assert.deepEqual(tools[0].inputSchema.properties.types.items.enum, ['domain', 'ip', 'email', 'handle', 'alias', 'wallet', 'unknown']);
+  assert.deepEqual(tools[1].inputSchema.required, ['id']);
+  assert.equal(tools[2].inputSchema.properties, undefined);
+});
