@@ -545,3 +545,141 @@ test('GET /healthz reports the number of findings', async () => {
   assert.equal(head.status, 200);
   assert.equal(head.body, '');
 });
+
+/** Asserts a 400 from /api/findings and returns the reported parameter names, in order. */
+async function invalidParams(query) {
+  const before = store.searches.length;
+  const res = await send({ path: `/api/findings?${query}` });
+  assert.equal(res.status, 400, query);
+  assert.equal(res.headers['content-type'], JSON_TYPE, query);
+  const { error } = JSON.parse(res.body);
+  assert.deepEqual(Object.keys(error), ['code', 'message', 'details'], query);
+  assert.equal(error.code, 'invalid_params', query);
+  assert.equal(error.message, 'Invalid query parameters', query);
+  for (const detail of error.details) {
+    assert.deepEqual(Object.keys(detail), ['param', 'message'], query);
+    assert.ok(typeof detail.message === 'string' && detail.message.length > 0, query);
+  }
+  assert.equal(store.searches.length, before, `${query}: the store is not asked`);
+  return error.details.map((detail) => detail.param);
+}
+
+/** Asserts a 200 from /api/findings and returns the parameters the store received. */
+async function storeParams(query) {
+  const before = store.searches.length;
+  const res = await send({ path: `/api/findings?${query}` });
+  assert.equal(res.status, 200, `${query}: ${res.body}`);
+  assert.equal(store.searches.length, before + 1, query);
+  return store.searches.at(-1);
+}
+
+test('every invalid parameter is reported under its HTTP name, all in one response', async () => {
+  const query = [
+    `q=${'x'.repeat(201)}`,
+    'type=banana',
+    'case=X-1',
+    'from=yesterday',
+    'to=2026-02-30',
+    'limit=0',
+    'offset=-1',
+    'includeDuplicates=maybe',
+  ].join('&');
+  assert.deepEqual(await invalidParams(query), ['q', 'type', 'case', 'from', 'to', 'limit', 'offset', 'includeDuplicates']);
+});
+
+test('each parameter is validated', async () => {
+  for (const [query, param] of [
+    [`q=${'x'.repeat(201)}`, 'q'],
+    ['type=banana', 'type'],
+    ['type=ip&type=banana', 'type'],
+    ['case=C104', 'case'],
+    ['from=2026-09-10T14:11:30', 'from'],
+    ['to=10.09.2026', 'to'],
+    ['from=2026-09-11&to=2026-09-10', 'to'],
+    ['limit=101', 'limit'],
+    ['limit=1.5', 'limit'],
+    ['limit=abc', 'limit'],
+    ['offset=100001', 'offset'],
+    ['includeDuplicates=yes', 'includeDuplicates'],
+  ]) {
+    assert.deepEqual(await invalidParams(query), [param], query);
+  }
+  assert.equal((await storeParams('limit=100&offset=100000')).limit, 100, 'the bounds themselves are valid');
+});
+
+test('unknown query parameters are ignored, the validator’s own key names included', async () => {
+  const query = 'foo=1&query=x&types=banana&caseId=X-1&Q=x&TYPE=banana&Limit=0&__proto__=1&constructor=1';
+  assert.deepEqual(await storeParams(query), DEFAULT_PARAMS);
+});
+
+test('empty values mean "not set"', async () => {
+  assert.deepEqual(await storeParams('q=&type=&case=&from=&to=&limit=&offset=&includeDuplicates='), DEFAULT_PARAMS);
+});
+
+test('repeated parameters: type values are joined, for the others the first wins', async () => {
+  const params = await storeParams('type=ip&type=&type=Domain&limit=5&limit=500&q=first&q=second');
+  assert.deepEqual(params.types, ['domain', 'ip']);
+  assert.equal(params.limit, 5);
+  assert.equal(params.query, 'first');
+});
+
+test('query values are form-decoded', async () => {
+  assert.equal((await storeParams('q=a+b%2Bc%20%C5%A0')).query, 'a b+c Š');
+});
+
+test('a malformed percent-encoding in a finding id gets 400', async () => {
+  const before = store.lookups.length;
+  for (const id of ['%E0%A4%A', '%', '%zz', 'F-1%']) {
+    const res = await send({ path: `/api/findings/${id}` });
+    assertJson(
+      res,
+      400,
+      {
+        error: {
+          code: 'invalid_params',
+          message: 'Invalid finding id',
+          details: [{ param: 'id', message: 'malformed percent-encoding' }],
+        },
+      },
+      id,
+    );
+    assertSecurityHeaders(res, id);
+  }
+  assert.equal(store.lookups.length, before, 'the store is not asked');
+});
+
+test('an id containing markup is echoed only inside JSON', async () => {
+  const res = await send({ path: '/api/findings/%3Cscript%3Ealert(1)%3C%2Fscript%3E' });
+  assertJson(res, 404, { error: { code: 'not_found', message: 'No finding with id <script>alert(1)</script>' } }, 'markup id');
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
+});
+
+test('other /api paths get 404 without asking the store', async () => {
+  const searches = store.searches.length;
+  const lookups = store.lookups.length;
+  for (const path of [
+    '/api/',
+    '/api/nope',
+    '/api/finding',
+    '/api/FINDINGS',
+    '/api/findings/',
+    '/api/findings/F-1/',
+    '/api/findings/F-1/raw',
+    '/api/cases/',
+    '/api/cases/C-101',
+  ]) {
+    assertJson(await send({ path }), 404, NOT_FOUND, path);
+  }
+  assert.equal(store.searches.length, searches);
+  assert.equal(store.lookups.length, lookups);
+});
+
+test('non-GET methods on the API get 405 without asking the store', async () => {
+  const searches = store.searches.length;
+  for (const method of ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']) {
+    const res = await send({ method, path: '/api/findings?q=x' });
+    assert.equal(res.status, 405, method);
+    assert.equal(res.headers.allow, 'GET, HEAD', method);
+  }
+  assert.equal(store.searches.length, searches);
+});

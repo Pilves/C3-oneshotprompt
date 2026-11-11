@@ -235,6 +235,35 @@ describe('HTTP API on the real dataset', { skip: storeModule === null && 'src/co
     assert.deepEqual(body, { status: 'ok', findings: 1032 });
   });
 
+  test('limit=101 gets 400 on limit', async () => {
+    const { status, headers, body } = await get('/api/findings?limit=101');
+    assert.equal(status, 400);
+    assert.equal(headers.get('content-type'), JSON_TYPE);
+    assert.equal(body.error.code, 'invalid_params');
+    assert.equal(body.error.details[0].param, 'limit');
+  });
+
+  test('type=banana gets 400 on type', async () => {
+    const { status, body } = await get('/api/findings?type=banana');
+    assert.equal(status, 400);
+    assert.deepEqual(
+      body.error.details.map((detail) => detail.param),
+      ['type'],
+    );
+  });
+
+  test('unknown query parameters are ignored', async () => {
+    const { status, body } = await get('/api/findings?foo=bar&query=zzzzqqq&types=banana');
+    assert.equal(status, 200);
+    assert.deepEqual(body, (await get('/api/findings')).body);
+  });
+
+  test('a malformed percent-encoding in a finding id gets 400', async () => {
+    const { status, body } = await get('/api/findings/%E0%A4%A');
+    assert.equal(status, 400);
+    assert.equal(body.error.code, 'invalid_params');
+  });
+
   test('an unsafe source gets no href', async () => {
     const { status, body } = await get('/api/findings/F-10968');
     assert.equal(status, 200);
