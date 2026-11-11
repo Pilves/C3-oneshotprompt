@@ -4,6 +4,8 @@ import { INSTRUCTIONS, TOOLS, callTool } from './tools.js';
 const MAX_BODY_BYTES = 1024 * 1024;
 // The tool list is static and identical for every caller (`server/utilities/caching`).
 const CACHE_HINTS = { ttlMs: 3_600_000, cacheScope: 'public' };
+const MAX_LISTEN_STREAMS = 16;
+const KEEP_ALIVE_MS = 25_000;
 const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 const JSON_MEDIA_TYPE = /^application\/json\s*(?:;|$)/i;
 const TOO_LARGE = Symbol('too large');
@@ -12,9 +14,12 @@ const TOO_LARGE = Symbol('too large');
  * Streamable HTTP endpoint for revision 2026-07-28. Stateless: every request is validated and answered on its own.
  * Host and Origin are checked by the caller before this runs.
  * @param {{ store: object, config: { mcpRateLimitPerMinute: number } }} options
- * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
+ * @returns {((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>)
+ *   & { close(): void, openStreamCount(): number }}  close() ends every open listen stream (for shutdown)
  */
 export function createMcpHandler({ store, config }) {
+  const streams = new Set();
+
   async function handler(req, res) {
     try {
       await handle(req, res);
@@ -65,14 +70,16 @@ export function createMcpHandler({ store, config }) {
     if (invalid) return sendJson(res, ...invalid);
 
     try {
-      return sendJson(res, ...dispatch(req, message, id));
+      const reply = dispatch(req, res, message, id);
+      if (reply) sendJson(res, ...reply);
     } catch (err) {
       console.error(`MCP ${message.method} failed:`, err);
       return sendJson(res, 500, rpcError(id, ERR.INTERNAL, 'Internal error'));
     }
   }
 
-  function dispatch(req, message, id) {
+  /** @returns {[number, object] | undefined} status and body, or undefined when the method wrote its own response */
+  function dispatch(req, res, message, id) {
     switch (message.method) {
       case 'server/discover':
         return [200, rpcResult(id, { supportedVersions: SUPPORTED_VERSIONS, capabilities: { tools: {} }, instructions: INSTRUCTIONS, ...CACHE_HINTS })];
@@ -82,6 +89,8 @@ export function createMcpHandler({ store, config }) {
         return [200, rpcResult(id, { tools: TOOLS, ...CACHE_HINTS })];
       case 'tools/call':
         return callToolRequest(req, message.params, id);
+      case 'subscriptions/listen':
+        return listen(res, id);
       default:
         return [404, rpcError(id, ERR.METHOD_NOT_FOUND, 'Method not found')];
     }
@@ -105,6 +114,44 @@ export function createMcpHandler({ store, config }) {
     return [200, rpcResult(id, callTool(store, name, args ?? {}))];
   }
 
+  /**
+   * `basic/patterns/subscriptions`. Nothing in this server ever changes, so no notification type is honoured:
+   * the acknowledgement carries an empty filter and the stream only keeps the connection alive until either side closes it.
+   */
+  function listen(res, id) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+    writeEvent(res, {
+      jsonrpc: '2.0',
+      method: 'notifications/subscriptions/acknowledged',
+      params: { _meta: { [META.subscriptionId]: id }, notifications: {} },
+    });
+    let timer;
+    const stream = {
+      // Graceful closure: answer the listen request itself, then end the stream.
+      end() {
+        clearInterval(timer);
+        streams.delete(stream);
+        if (res.writableEnded || res.destroyed) return;
+        writeEvent(res, rpcResult(id, { _meta: { [META.subscriptionId]: id } }));
+        res.end();
+      },
+    };
+    // Over the cap the stream is closed gracefully at once, which tells the client it ended rather than failed.
+    if (streams.size >= MAX_LISTEN_STREAMS) return stream.end();
+    timer = setInterval(() => res.write(':\n\n'), KEEP_ALIVE_MS);
+    timer.unref();
+    streams.add(stream);
+    // Closing the stream is the client's cancellation (`basic/patterns/cancellation`).
+    res.on('close', () => {
+      clearInterval(timer);
+      streams.delete(stream);
+    });
+  }
+
+  handler.close = () => {
+    for (const stream of streams) stream.end();
+  };
+  handler.openStreamCount = () => streams.size;
   return handler;
 }
 
@@ -157,6 +204,10 @@ function metaOf(message) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function writeEvent(res, message) {
+  res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
 }
 
 function sendJson(res, status, body, headers) {

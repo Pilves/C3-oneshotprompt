@@ -217,3 +217,98 @@ test('a tool that throws → 500 -32603 without detail', async (t) => {
   assert.doesNotMatch(response.text, /secret detail/);
   assert.equal(logged.mock.callCount(), 1);
 });
+
+/** Opens a listen stream and returns a reader of its SSE events (comment lines skipped; null at end of stream). */
+async function openListen(url, id, signal) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': 'subscriptions/listen' },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'subscriptions/listen', params: { notifications: { toolsListChanged: true }, _meta: ENVELOPE } }),
+    signal,
+  });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  async function nextEvent() {
+    for (;;) {
+      const end = buffer.indexOf('\n\n');
+      if (end !== -1) {
+        const block = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        const data = block.split('\n').filter((line) => line.startsWith('data: ')).map((line) => line.slice(6));
+        if (data.length > 0) return JSON.parse(data.join('\n'));
+        continue;
+      }
+      const { value, done } = await reader.read();
+      if (done) return null;
+      buffer += decoder.decode(value, { stream: true });
+    }
+  }
+  return { res, nextEvent };
+}
+
+async function waitFor(condition) {
+  for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(condition(), 'condition not reached within 1 s');
+}
+
+function assertAcknowledged(event, id) {
+  assert.deepEqual(event, {
+    jsonrpc: '2.0',
+    method: 'notifications/subscriptions/acknowledged',
+    params: { _meta: { [META.subscriptionId]: id }, notifications: {} },
+  });
+}
+
+function assertCompleted(event, id) {
+  assert.deepEqual(event, {
+    jsonrpc: '2.0',
+    id,
+    result: { resultType: 'complete', _meta: { [META.subscriptionId]: id, [META.serverInfo]: SERVER_INFO } },
+  });
+}
+
+for (const id of ['listen-1', 42]) {
+  test(`subscriptions/listen acknowledges first with subscriptionId ${JSON.stringify(id)}; aborting closes it server-side`, async () => {
+    const { url, handler } = await start();
+    const abort = new AbortController();
+    const { res, nextEvent } = await openListen(url, id, abort.signal);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/event-stream');
+    assert.equal(res.headers.get('cache-control'), 'no-cache, no-transform');
+    assert.equal(res.headers.get('x-accel-buffering'), 'no');
+    assertAcknowledged(await nextEvent(), id);
+    assert.equal(handler.openStreamCount(), 1);
+    abort.abort();
+    await waitFor(() => handler.openStreamCount() === 0);
+  });
+}
+
+test('handler.close() answers the listen request and ends the stream', async () => {
+  const { url, handler } = await start();
+  const { nextEvent } = await openListen(url, 'shutdown');
+  assertAcknowledged(await nextEvent(), 'shutdown');
+  handler.close();
+  assertCompleted(await nextEvent(), 'shutdown');
+  assert.equal(await nextEvent(), null);
+  assert.equal(handler.openStreamCount(), 0);
+});
+
+test('the 17th listen stream is acknowledged, completed and ended at once', async () => {
+  const { url, handler } = await start();
+  const abort = new AbortController();
+  const open = [];
+  for (let i = 0; i < 16; i++) {
+    const stream = await openListen(url, i, abort.signal);
+    assertAcknowledged(await stream.nextEvent(), i);
+    open.push(stream);
+  }
+  assert.equal(handler.openStreamCount(), 16);
+  const extra = await openListen(url, 'extra');
+  assertAcknowledged(await extra.nextEvent(), 'extra');
+  assertCompleted(await extra.nextEvent(), 'extra');
+  assert.equal(await extra.nextEvent(), null);
+  assert.equal(handler.openStreamCount(), 16);
+  abort.abort();
+  await waitFor(() => handler.openStreamCount() === 0);
+});
