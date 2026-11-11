@@ -1,6 +1,9 @@
 // All text from the API is untrusted. It reaches the page only through textContent, text nodes
 // and property assignment; see docs/DESIGN.md section 7.
-import { splitByRanges, buildSearchQuery } from './highlight.js';
+import { FINDING_TYPES, splitByRanges, buildSearchQuery } from './highlight.js';
+
+// The data says handle and alias; the task says username and pseudonym (DESIGN.md T2).
+const TYPE_LABELS = { handle: 'handle (username)', alias: 'alias (pseudonym)' };
 
 const FLAG_TEXT = {
   id_missing: 'The record has no id; one was made up from its position in the file.',
@@ -25,12 +28,20 @@ const byId = (id) => document.getElementById(id);
 const ui = {
   form: byId('search-form'),
   q: byId('q'),
+  typeFilter: byId('type-filter'),
+  caseSelect: byId('case'),
+  from: byId('from'),
+  to: byId('to'),
+  dups: byId('dups'),
   status: byId('status'),
   results: byId('results'),
   pager: byId('pager'),
   prev: byId('prev'),
   next: byId('next'),
 };
+
+const typeInputs = new Map();
+const typeCounts = new Map();
 
 let state = { q: '', types: [], case: '', from: '', to: '', dups: false, offset: 0 };
 let pageSize = 20;
@@ -80,14 +91,17 @@ async function runSearch() {
 }
 
 function showSearchError(message) {
+  for (const count of typeCounts.values()) count.textContent = '';
   ui.status.className = 'error';
   ui.status.textContent = message;
   ui.results.replaceChildren();
   ui.pager.hidden = true;
 }
 
-function renderResults({ total, limit, offset, results }) {
+function renderResults({ total, limit, offset, results, facets }) {
   pageSize = limit;
+  // Facets ignore the type filter, so each count says what ticking that type would add.
+  for (const [type, count] of typeCounts) count.textContent = `(${facets?.types?.[type] ?? 0})`;
   ui.status.className = '';
   if (total === 0) ui.status.textContent = 'No findings match.';
   else if (results.length === 0) ui.status.textContent = `No results on this page; ${plural(total, 'finding')} in total.`;
@@ -119,7 +133,15 @@ function resultItem(f) {
 
 function search() {
   clearTimeout(typingTimer);
-  state = { ...state, q: ui.q.value.trim(), offset: 0 };
+  state = {
+    q: ui.q.value.trim(),
+    types: FINDING_TYPES.filter((type) => typeInputs.get(type).checked),
+    case: ui.caseSelect.value,
+    from: ui.from.value,
+    to: ui.to.value,
+    dups: ui.dups.checked,
+    offset: 0,
+  };
   runSearch();
 }
 
@@ -129,9 +151,32 @@ function page(offset) {
   window.scrollTo(0, 0);
 }
 
+async function loadCases() {
+  try {
+    const res = await fetch('/api/cases');
+    if (!res.ok) return;
+    const { cases } = await res.json();
+    ui.caseSelect.append(...cases.map((c) => el('option', { value: c.caseId }, c.caseId)));
+  } catch {
+    // The filter still offers "any" and "unassigned"; the search itself reports server problems.
+  }
+}
+
+for (const type of FINDING_TYPES) {
+  const input = el('input', { type: 'checkbox', value: type });
+  const count = el('span', { className: 'count' });
+  typeInputs.set(type, input);
+  typeCounts.set(type, count);
+  ui.typeFilter.append(el('label', null, input, ` ${TYPE_LABELS[type] ?? type} `, count));
+}
+
 ui.q.addEventListener('input', () => {
   clearTimeout(typingTimer);
   typingTimer = setTimeout(search, 250);
+});
+// The text box also fires change on blur; typing is handled above.
+ui.form.addEventListener('change', (event) => {
+  if (event.target !== ui.q) search();
 });
 ui.form.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -140,4 +185,5 @@ ui.form.addEventListener('submit', (event) => {
 ui.prev.addEventListener('click', () => page(Math.max(0, state.offset - pageSize)));
 ui.next.addEventListener('click', () => page(state.offset + pageSize));
 
+loadCases();
 runSearch();

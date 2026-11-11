@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { splitByRanges, safeHref, buildSearchQuery } from '../../public/highlight.js';
-import { parseSearchParams } from '../../src/core/params.js';
+import { FINDING_TYPES, splitByRanges, safeHref, buildSearchQuery } from '../../public/highlight.js';
+import { FINDING_TYPES as CORE_TYPES, parseSearchParams } from '../../src/core/params.js';
+
+test('the UI offers the same types, in the same order, as the core', () => {
+  assert.deepEqual(FINDING_TYPES, CORE_TYPES);
+});
 
 const joined = (parts) => parts.map((p) => p.text).join('');
 const hits = (parts) => parts.filter((p) => p.hit).map((p) => p.text);

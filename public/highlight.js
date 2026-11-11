@@ -1,5 +1,8 @@
 // Pure helpers shared by the page and the Node tests: nothing here may touch the DOM.
 
+// Same list and order as src/core/params.js, which the browser cannot import; a test keeps them equal.
+export const FINDING_TYPES = ['domain', 'ip', 'email', 'handle', 'alias', 'wallet', 'unknown'];
+
 /**
  * Cuts `text` into plain and highlighted parts at server-supplied [start, end) UTF-16 offsets.
  * Ranges are not trusted: bad ones are dropped, the rest clamped and merged, so the parts
