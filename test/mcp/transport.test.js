@@ -258,3 +258,35 @@ test('initialize without params.protocolVersion reports the header version, or "
   const bare = await rpc('initialize', {}, { meta: null, omitHeaders: ['MCP-Protocol-Version', 'Mcp-Method'] });
   assert.equal(bare.body.error.data.requested, 'unknown');
 });
+
+test('Mcp-Session-Id and Last-Event-ID are ignored and no session id is minted', async () => {
+  const response = await rpc('tools/list', {}, { headers: { 'Mcp-Session-Id': 'abc', 'Last-Event-ID': '5' } });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.body.result.resultType, 'complete');
+  assert.equal(response.headers.get('mcp-session-id'), null);
+});
+
+test('a request without Accept is still answered', async () => {
+  const response = await rpc('tools/list', {}, { omitHeaders: ['Accept'] });
+  assert.equal(response.status, 200, response.text);
+});
+
+test('header names are matched case-insensitively', async () => {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'server/discover', params: { _meta: ENVELOPE } });
+  const response = await new Promise((resolve, reject) => {
+    const req = http.request(url, {
+      method: 'POST',
+      headers: { 'content-TYPE': 'application/json', 'mcp-PROTOCOL-version': '2026-07-28', 'MCP-METHOD': 'server/discover' },
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => (text += chunk));
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.id, 9);
+  assert.equal(response.body.result.resultType, 'complete');
+});
