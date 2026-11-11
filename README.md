@@ -48,7 +48,7 @@ It listens on `127.0.0.1:3000` and logs what it loaded, including a count per da
 | `HOST` | `127.0.0.1` | Address to bind. The image sets `0.0.0.0`, because a container must listen on all its interfaces to be published |
 | `DATA_FILE` | `findings.json` in the repository root | The dataset |
 | `ALLOWED_HOSTS` | (empty) | Comma-separated host names accepted in `Host` and `Origin`, in addition to the loopback names |
-| `MCP_RATE_LIMIT_PER_MIN` | `120` | MCP tool calls per client address per minute; `0` disables the limit |
+| `MCP_RATE_LIMIT_PER_MIN` | `120` | MCP tool calls per minute per source address; `0` disables the limit. Behind the loopback-only Docker port mapping every client arrives from the same address, so in practice this is one budget shared by all local clients |
 
 ## Tests
 

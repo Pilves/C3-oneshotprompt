@@ -282,7 +282,7 @@ Section names refer to pages under <https://modelcontextprotocol.io/specificatio
 | A tool with `outputSchema` MUST return conforming `structuredContent`, and SHOULD also return it serialised in a text block | `server/tools` › Structured Content, Output Schema | Both, on every successful call |
 | `subscriptions/listen`: first message is `notifications/subscriptions/acknowledged` carrying the subscription id; closing the stream cancels | `basic/patterns/subscriptions`; `basic/patterns/cancellation` | Implemented minimally: acknowledges with an empty filter (nothing here ever changes), sends keep-alive comments, ends cleanly on shutdown |
 | Servers MUST NOT send JSON-RPC requests | `basic/patterns` | None. No sampling, elicitation or roots; no client capability is ever required, so `-32021` is never returned |
-| Tool security: validate inputs, rate-limit, sanitise outputs, access control | `server/tools` › Security Considerations | Inputs validated by the shared validator; a simple per-address rate limit on `tools/call`; outputs are JSON-encoded data with an explicit handling notice (6.5). Access control: see 8 |
+| Tool security: validate inputs, rate-limit, sanitise outputs, access control | `server/tools` › Security Considerations | Inputs validated by the shared validator; a simple per-source-address rate limit on `tools/call` (with loopback-only publishing all local clients share one budget, since they arrive from the same address; trusting `X-Forwarded-For` instead would let any client reset its own budget); outputs are JSON-encoded data with an explicit handling notice (6.5). Access control: see 8 |
 
 ### 6.3 Legacy clients: a stateless dual-era fallback
 
