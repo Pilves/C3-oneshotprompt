@@ -28,7 +28,9 @@ const HTTP_URL = /^https?:\/\//i;
 const ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const HOST_AND_PORT = /^[a-z0-9.-]+\.[a-z]{2,}:\d+(\/|$)/i;
 const SCHEMELESS_URL = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(:\d+)?(\/\S*)?$/i;
-const MARKUP = /<\/?[a-z!][^>]*>|&(?:[a-z]+|#\d+);/i;
+// `[^<>]*` rather than `[^>]*`: a tag body ends at the next `<`, which keeps the scan linear on a
+// note full of unclosed tags (the latter takes seconds on 150 KB).
+const MARKUP = /<\/?[a-z!][^<>]*>|&(?:[a-z]+|#\d+);/i;
 const INSTRUCTION_LIKE =
   /(?:^|[\s<>])(?:system|assistant|ai analyst|ai assistant)\s*:|\bignore\b.{0,40}\b(?:instructions?|user|question|above|previous)\b|\bdo not mention\b|\breply only with\b|<\/?important>/i;
 const LABEL_SYNONYMS = { ipv4: 'ip', ipv6: 'ip' };
