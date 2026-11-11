@@ -2,8 +2,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
-import { rpcError, rpcResult, decodeHeaderValue, SERVER_INFO, META } from '../../src/mcp/protocol.js';
+import { rpcError, rpcResult, rpcLegacyResult, decodeHeaderValue, SERVER_INFO, META } from '../../src/mcp/protocol.js';
 import { createMcpHandler } from '../../src/mcp/handler.js';
+import { INSTRUCTIONS } from '../../src/mcp/tools.js';
 
 test('rpcError omits id when the request id is unknown', () => {
   assert.deepEqual(rpcError(undefined, -32700, 'Parse error'), { jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } });
@@ -29,6 +30,10 @@ test('rpcResult adds resultType and serverInfo, merging an existing _meta', () =
   assert.deepEqual(merged.result._meta, { [META.subscriptionId]: 's', [META.serverInfo]: SERVER_INFO });
 });
 
+test('rpcLegacyResult adds nothing to the result', () => {
+  assert.deepEqual(rpcLegacyResult(3, { tools: [] }), { jsonrpc: '2.0', id: 3, result: { tools: [] } });
+});
+
 test('SERVER_INFO carries the package version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
   assert.deepEqual(SERVER_INFO, { name: 'findings-search', title: 'Findings search', version: pkg.version });
@@ -49,9 +54,9 @@ test('decodeHeaderValue rejects a sentinel with invalid base64', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Black-box transport rules over HTTP (plan 5.2). The store is never reached by these requests.
+// Black-box transport rules over HTTP (plan 5.2, with owner decision O2: dual-era). Only list_cases reaches the store.
 
-const FAKE_STORE = {};
+const FAKE_STORE = { listCases: () => ({ cases: [], unassigned: { findingCount: 0 } }) };
 const ENVELOPE = {
   [META.protocolVersion]: '2026-07-28',
   [META.clientCapabilities]: {},
@@ -197,7 +202,7 @@ test('Mcp-Method that differs from the body, including by letter case → 400 -3
   assertError(await rpc('tools/list', {}, { headers: { 'Mcp-Method': 'Tools/List' } }), 400, -32020, 1);
 });
 
-test('header 2025-11-25 without the envelope → 400 -32022', async () => {
+test('header 2025-11-25 with Mcp-Method but without the envelope → 400 -32022 (Mcp-Method marks it modern)', async () => {
   const response = await rpc('tools/list', {}, { meta: null, headers: { 'MCP-Protocol-Version': '2025-11-25' } });
   assertError(response, 400, -32022, 1);
   assert.deepEqual(response.body.error.data, { supported: ['2026-07-28'], requested: '2025-11-25' });
@@ -239,24 +244,120 @@ for (const method of ['foo/bar', 'ping', 'prompts/list', 'resources/list']) {
 
 const INITIALIZE = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'legacy', version: '1' } };
 
-test('initialize without any modern header → 400 -32022 naming the supported versions', async () => {
-  const response = await rpc('initialize', INITIALIZE, { meta: null, omitHeaders: ['MCP-Protocol-Version', 'Mcp-Method'] });
-  assertError(response, 400, -32022, 1);
-  assert.deepEqual(response.body.error.data.supported, ['2026-07-28']);
-  assert.equal(response.body.error.data.requested, '2025-11-25');
-});
-
 test('initialize with full modern headers and envelope → 400 -32022', async () => {
   const response = await rpc('initialize', INITIALIZE);
   assertError(response, 400, -32022, 1);
   assert.deepEqual(response.body.error.data, { supported: ['2026-07-28'], requested: '2025-11-25' });
 });
 
-test('initialize without params.protocolVersion reports the header version, or "unknown"', async () => {
-  const withHeader = await rpc('initialize', {}, { meta: null, headers: { 'MCP-Protocol-Version': '2025-06-18' }, omitHeaders: ['Mcp-Method'] });
+test('initialize with any single modern marker → 400 -32022, so a dual-era client does not fall back', async () => {
+  const markers = [
+    { meta: { ...ENVELOPE }, omitHeaders: ['MCP-Protocol-Version', 'Mcp-Method'] },
+    { meta: null, omitHeaders: ['Mcp-Method'] },
+    { meta: null, omitHeaders: ['MCP-Protocol-Version'] },
+  ];
+  for (const options of markers) {
+    const response = await rpc('initialize', INITIALIZE, options);
+    assertError(response, 400, -32022, 1);
+    assert.deepEqual(response.body.error.data, { supported: ['2026-07-28'], requested: '2025-11-25' });
+  }
+});
+
+test('a modern initialize without params.protocolVersion reports the header version, or "unknown"', async () => {
+  const withHeader = await rpc('initialize', {}, { meta: null, headers: { 'MCP-Protocol-Version': '2025-06-18' } });
+  assertError(withHeader, 400, -32022, 1);
   assert.equal(withHeader.body.error.data.requested, '2025-06-18');
-  const bare = await rpc('initialize', {}, { meta: null, omitHeaders: ['MCP-Protocol-Version', 'Mcp-Method'] });
+  const bare = await rpc('initialize', {}, { meta: null, omitHeaders: ['MCP-Protocol-Version'] });
   assert.equal(bare.body.error.data.requested, 'unknown');
+});
+
+test('an unknown header version with no other modern marker → 400 -32022', async () => {
+  const response = await legacy('tools/list', {}, { version: '1900-01-01' });
+  assertError(response, 400, -32022, 1);
+  assert.deepEqual(response.body.error.data, { supported: ['2026-07-28'], requested: '1900-01-01' });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy (initialize-based) clients: no envelope, no Mcp-Method, and a 2025 version header or none.
+
+/** A 2025-style request: plain params, and an MCP-Protocol-Version header only when `version` is given. */
+function legacy(method, params, { version, id = 1, headers = {} } = {}) {
+  return rpc(method, params, {
+    id,
+    meta: null,
+    headers: { ...(version !== undefined && { 'MCP-Protocol-Version': version }), ...headers },
+    omitHeaders: ['Mcp-Method', 'Mcp-Name', ...(version === undefined ? ['MCP-Protocol-Version'] : [])],
+  });
+}
+
+function assertLegacyResult(response, id = 1) {
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.headers.get('content-type'), 'application/json');
+  assert.equal(response.headers.get('mcp-session-id'), null);
+  assert.deepEqual(Object.keys(response.body).sort(), ['id', 'jsonrpc', 'result']);
+  assert.equal(response.body.id, id);
+  const { result } = response.body;
+  for (const modernOnly of ['resultType', 'ttlMs', 'cacheScope', '_meta']) assert.equal(modernOnly in result, false, modernOnly);
+  return result;
+}
+
+for (const version of ['2025-11-25', '2025-06-18', '2025-03-26']) {
+  test(`legacy initialize with ${version} → 200, the same version echoed, no session`, async () => {
+    const response = await legacy('initialize', { ...INITIALIZE, protocolVersion: version }, { headers: { 'Mcp-Session-Id': 'stale' } });
+    assert.deepEqual(assertLegacyResult(response), {
+      protocolVersion: version,
+      capabilities: { tools: {} },
+      serverInfo: SERVER_INFO,
+      instructions: INSTRUCTIONS,
+    });
+  });
+}
+
+test('legacy initialize with an unsupported or missing version → the latest legacy version', async () => {
+  for (const protocolVersion of ['2024-11-05', '1999-01-01', 42, undefined]) {
+    const response = await legacy('initialize', { ...INITIALIZE, protocolVersion });
+    assert.equal(assertLegacyResult(response).protocolVersion, '2025-11-25');
+  }
+  // A 2025 header on the initialize itself is not a modern marker either.
+  const withHeader = await legacy('initialize', { ...INITIALIZE, protocolVersion: '2024-11-05' }, { version: '2025-11-25' });
+  assert.equal(assertLegacyResult(withHeader).protocolVersion, '2025-11-25');
+});
+
+test('legacy notifications/initialized → 202', async () => {
+  const response = await rpc('notifications/initialized', {}, { meta: null, omitHeaders: ['Mcp-Method'], headers: { 'MCP-Protocol-Version': '2025-11-25' }, rawBody: '{"jsonrpc":"2.0","method":"notifications/initialized"}' });
+  assert.equal(response.status, 202);
+  assert.equal(response.text, '');
+});
+
+test('legacy tools/list with a 2025 header or with none → the same tools, no cache hints', async () => {
+  const modern = await rpc('tools/list');
+  for (const version of ['2025-11-25', '2025-06-18', '2025-03-26', undefined]) {
+    const result = assertLegacyResult(await legacy('tools/list', {}, { version }));
+    assert.deepEqual(Object.keys(result), ['tools']);
+    assert.deepEqual(result.tools, modern.body.result.tools);
+  }
+  assertError(await legacy('tools/list', { cursor: 'abc' }, { version: '2025-11-25' }), 200, -32602, 1);
+});
+
+test('legacy tools/call works without Mcp-Name and returns the same tool result', async () => {
+  const result = assertLegacyResult(await legacy('tools/call', { name: 'list_cases', arguments: {} }, { version: '2025-11-25', id: 'c' }), 'c');
+  assert.deepEqual(result.structuredContent.cases, []);
+  assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify(result.structuredContent) }]);
+  // A missing header is 2025-03-26, which also had tools/call.
+  assertLegacyResult(await legacy('tools/call', { name: 'list_cases' }));
+  assertError(await legacy('tools/call', { name: 'nope', arguments: {} }, { version: '2025-11-25' }), 200, -32602, 1);
+  assertError(await legacy('tools/call', { arguments: {} }, { version: '2025-11-25' }), 200, -32602, 1);
+});
+
+test('legacy ping → 200 with an empty result', async () => {
+  const response = await legacy('ping', undefined, { version: '2025-11-25', id: 'p' });
+  assert.deepEqual(assertLegacyResult(response, 'p'), {});
+});
+
+test('legacy unknown method → 200 -32601 (a 404 means "session gone" to a 2025 client)', async () => {
+  for (const method of ['foo/bar', 'prompts/list', 'server/discover', 'subscriptions/listen']) {
+    assertError(await legacy(method, {}, { version: '2025-11-25' }), 200, -32601, 1);
+  }
 });
 
 test('Mcp-Session-Id and Last-Event-ID are ignored and no session id is minted', async () => {

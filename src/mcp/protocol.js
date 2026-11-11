@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 
 export const PROTOCOL_VERSION = '2026-07-28';
 export const SUPPORTED_VERSIONS = [PROTOCOL_VERSION];
+/** Initialize-based revisions served by the stateless fallback, newest first. All three use Streamable HTTP. */
+export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
 
 export const META = {
   protocolVersion: 'io.modelcontextprotocol/protocolVersion',
@@ -40,6 +42,11 @@ export function rpcResult(id, result) {
     id,
     result: { resultType: 'complete', ...result, _meta: { ...result._meta, [META.serverInfo]: SERVER_INFO } },
   };
+}
+
+/** Legacy revisions define no `resultType` and no per-result serverInfo, so their results are sent as they are. */
+export function rpcLegacyResult(id, result) {
+  return { jsonrpc: '2.0', id, result };
 }
 
 const BASE64_SENTINEL = /^=\?base64\?(.*)\?=$/s;
