@@ -1,4 +1,24 @@
 import http from 'node:http';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+export const PUBLIC_FILES = {
+  'index.html': '<!doctype html><title>Findings</title><script type="module" src="/app.js"></script>\n',
+  'app.js': "import './highlight.js';\n",
+  'highlight.js': '// Šokolaadimees: multi-byte, so Content-Length must count bytes\nexport {};\n',
+  'style.css': 'body { color: #111; }\n',
+};
+
+/**
+ * Writes the four UI files to a temporary directory. They are not kept under test/: `node --test` runs every
+ * .js file below test/ as a test file.
+ */
+export function makePublicDir(files = PUBLIC_FILES) {
+  const dir = mkdtempSync(join(tmpdir(), 'findings-public-'));
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+  return { dir, remove: () => rmSync(dir, { recursive: true, force: true }) };
+}
 
 /**
  * Starts `handler` on an ephemeral loopback port.
