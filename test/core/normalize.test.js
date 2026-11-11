@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectShape, normalizeType } from '../../src/core/normalize.js';
+import { detectShape, normalizeType, normalizeCaseIds, normalizeObservedAt } from '../../src/core/normalize.js';
 
 test('detectShape', () => {
   const cases = [
@@ -73,4 +73,75 @@ test('type: missing or unknown label', () => {
 
 test('type: empty entity is unknown without a mismatch (entity_missing covers it)', () => {
   assert.deepEqual(normalizeType('ip', ''), { type: 'unknown', mismatch: false });
+});
+
+test('case ids', () => {
+  const rows = [
+    [' c-117', ['C-117'], []], // F-10335
+    ['C-104', ['C-104'], []],
+    [['C-104', 'C-122'], ['C-104', 'C-122'], ['multi_case']], // F-10906
+    [['C-122', 'C-104'], ['C-104', 'C-122'], ['multi_case']],
+    [['C-104', ' c-104 '], ['C-104'], []],
+    [['C-10', 'C-9', 'C-100'], ['C-9', 'C-10', 'C-100'], ['multi_case']],
+    [null, [], ['case_missing']], // F-10767
+    [undefined, [], ['case_missing']],
+    [[], [], ['case_missing']],
+    ['X-1', [], ['case_missing', 'case_invalid']],
+    ['C-', [], ['case_missing', 'case_invalid']],
+    ['', [], ['case_missing', 'case_invalid']],
+    [42, [], ['case_missing', 'case_invalid']],
+    [{ id: 'C-104' }, [], ['case_missing', 'case_invalid']],
+    [['C-104', 'nope', 7], ['C-104'], ['case_invalid']],
+    [['C-122', 'bad', 'C-9'], ['C-9', 'C-122'], ['case_invalid', 'multi_case']],
+  ];
+  for (const [value, caseIds, flags] of rows) {
+    assert.deepEqual(normalizeCaseIds(value), { caseIds, flags }, JSON.stringify(value));
+  }
+});
+
+test('observedAt: valid forms become UTC ISO strings with milliseconds', () => {
+  const rows = [
+    ['2026-09-02T19:26:14Z', '2026-09-02T19:26:14.000Z'],
+    ['2026-09-10T14:11:30+03:00', '2026-09-10T11:11:30.000Z'], // F-10327
+    ['2026-11-02T08:00:00+02:00', '2026-11-02T06:00:00.000Z'],
+    ['2026-09-10T14:11:30.25-02:30', '2026-09-10T16:41:30.250Z'],
+    ['2026-09-10T14:11Z', '2026-09-10T14:11:00.000Z'],
+    [' 2026-09-10T14:11:30Z ', '2026-09-10T14:11:30.000Z'],
+    [1789624672000, '2026-09-17T05:57:52.000Z'], // epoch ms, F-10142
+    [1789624672, '2026-09-17T05:57:52.000Z'], // epoch seconds
+    ['1789624672000', '2026-09-17T05:57:52.000Z'],
+    ['1789624672', '2026-09-17T05:57:52.000Z'],
+    [1789624672000.7, '2026-09-17T05:57:52.000Z'],
+  ];
+  for (const [value, iso] of rows) {
+    assert.deepEqual(normalizeObservedAt(value), { iso, ms: Date.parse(iso), flags: [] }, JSON.stringify(value));
+  }
+});
+
+test('observedAt: anything else is time_invalid', () => {
+  const invalid = { iso: null, ms: null, flags: ['time_invalid'] };
+  for (const value of [
+    'yesterday',
+    '2026-09-10T14:11:30', // no zone: guessing one would shift the instant by hours
+    '2026-09-10',
+    '2026-09-10 14:11:30Z',
+    '2026-09-10T14:11:30+0300',
+    '2026-02-30T10:00:00Z',
+    '2026-09-10T24:00:00Z',
+    '2026-09-10T23:60:00Z',
+    '2026-09-10T12:00:00+24:00',
+    '',
+    '-1789624672',
+    '1e12',
+    null,
+    undefined,
+    NaN,
+    Infinity,
+    1e300,
+    true,
+    [1789624672000],
+    { at: 1789624672000 },
+  ]) {
+    assert.deepEqual(normalizeObservedAt(value), invalid, String(value));
+  }
 });
